@@ -9,11 +9,12 @@ Submitter entry for GenLayer's builder program, "Intelligent Contract"
 category. Contract-only submission (no frontend/backend).
 
 **Live evidence** — deployed and driven end-to-end on studionet (see
-[Studionet deployment & evidence](#studionet-deployment--evidence)):
+[Studionet deployment & evidence](#studionet-deployment--evidence);
+explorer: <https://explorer-studio.genlayer.com/>):
 
-- Contract: `0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`
-- Deploy tx: `0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58`
-- LLM-consensus arbitration tx (`resolve_dispute`): `0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6`
+- Contract: [`0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`](https://explorer-studio.genlayer.com/address/0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D)
+- Deploy tx: [`0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58`](https://explorer-studio.genlayer.com/tx/0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58)
+- LLM-consensus arbitration tx (`resolve_dispute`): [`0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6`](https://explorer-studio.genlayer.com/tx/0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6)
 
 ## The use case
 
@@ -242,8 +243,8 @@ transactions below executed with `execution_result = SUCCESS` and can be
 verified independently on studionet.
 
 **Network:** studionet — "Genlayer Studio Network", chainId **61999**, RPC
-`https://studio.genlayer.com/api` (explorer: `https://genlayer-explorer.vercel.app`)
-**Deployed contract address:** `0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`
+`https://studio.genlayer.com/api` (explorer: <https://explorer-studio.genlayer.com/>)
+**Deployed contract address:** [`0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`](https://explorer-studio.genlayer.com/address/0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D)
 
 **Accounts used (both real, distinct signers):**
 
@@ -265,7 +266,7 @@ genlayer account import --name escrow-builder --private-key "$GENLAYER_PRIVATE_K
 genlayer deploy --contract contracts/freelance_escrow.py
 ```
 
-- Deploy tx hash: `0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58` (status ACCEPTED)
+- Deploy tx hash: [`0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58`](https://explorer-studio.genlayer.com/tx/0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58) (status FINALIZED in the explorer index)
 
 **2 — A raw `genlayer write` (smoke test, id `job-cli-1`):**
 
@@ -285,14 +286,14 @@ python scripts/studionet_e2e_demo.py \
     --freelancer-password-stdin
 ```
 
-| Step | Method (signer) | Tx hash | Result |
+| Step | Method (signer) | Tx hash (clickable — explorer) | Result |
 |---|---|---|---|
-| 1 | `create_agreement` (client) | `0x000b9e5b0476fad82bb1ce4192b082f2fb4ba5548254ed15542627fae22b2e06` | agreement stored, status `created` |
-| 2 | `fund_escrow` +5 GEN (client) | `0x50540ac44d0faf83210fa74420d3498a4104cc6dae89329f4280f9c0502ace29` | status `funded`, escrow pool credited |
-| 3 | `submit_delivery` (freelancer) | `0x36021b93d8a93e6df02ce33f2c073368c462af53767d134763fb00043d769bb2` | status `delivered` |
-| 4 | `raise_dispute` (client) | `0x56e7b952f41b3dde9306b965557085829452b3fe68f2b5a23114bfc5a7ea9297` | status `disputed` |
-| 5 | `resolve_dispute` (client) | `0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6` | **LLM arbitration through full validator consensus**, status `arbitrated` |
-| 6 | `accept_resolution` (client) | `0x306cf38ed10e434d811577187c2559c39d69cb2d03341b210d918e4e0de2ca67` | settlement credited to payout ledger |
+| 1 | `create_agreement` (client) | [`0x000b9e5b0476fad82bb1ce4192b082f2fb4ba5548254ed15542627fae22b2e06`](https://explorer-studio.genlayer.com/tx/0x000b9e5b0476fad82bb1ce4192b082f2fb4ba5548254ed15542627fae22b2e06) | agreement stored, status `created` |
+| 2 | `fund_escrow` +5 GEN (client) | [`0x50540ac44d0faf83210fa74420d3498a4104cc6dae89329f4280f9c0502ace29`](https://explorer-studio.genlayer.com/tx/0x50540ac44d0faf83210fa74420d3498a4104cc6dae89329f4280f9c0502ace29) | status `funded`, escrow pool credited |
+| 3 | `submit_delivery` (freelancer) | [`0x36021b93d8a93e6df02ce33f2c073368c462af53767d134763fb00043d769bb2`](https://explorer-studio.genlayer.com/tx/0x36021b93d8a93e6df02ce33f2c073368c462af53767d134763fb00043d769bb2) | status `delivered` |
+| 4 | `raise_dispute` (client) | [`0x56e7b952f41b3dde9306b965557085829452b3fe68f2b5a23114bfc5a7ea9297`](https://explorer-studio.genlayer.com/tx/0x56e7b952f41b3dde9306b965557085829452b3fe68f2b5a23114bfc5a7ea9297) | status `disputed` |
+| 5 | `resolve_dispute` (client) | [`0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6`](https://explorer-studio.genlayer.com/tx/0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6) | **LLM arbitration through full validator consensus**, status `arbitrated` |
+| 6 | `accept_resolution` (client) | [`0x306cf38ed10e434d811577187c2559c39d69cb2d03341b210d918e4e0de2ca67`](https://explorer-studio.genlayer.com/tx/0x306cf38ed10e434d811577187c2559c39d69cb2d03341b210d918e4e0de2ca67) | settlement credited to payout ledger |
 
 Final on-chain state read back after step 6:
 
