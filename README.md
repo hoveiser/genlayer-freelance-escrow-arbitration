@@ -142,6 +142,7 @@ tests/integration/                # full-consensus tests via gltest
 gltest.config.yaml                # integration-test network/account config
 requirements.txt                  # genlayer-test + genvm-linter + pytest
 scripts/setup_direct_test_cache.sh# one-time local cache fix (see below)
+scripts/studionet_e2e_demo.py     # drives the live studionet lifecycle (evidence)
 ```
 
 ## Setup
@@ -225,6 +226,80 @@ freelancer) and asserts:
 > arbitration prompts — 2 passed, ~2.6 min). Deploy, schema pull, and every
 > write method executed through full consensus on the pinned runner.
 
+## Studionet deployment & evidence
+
+A **persistent, standalone deployment** (independent of the ephemeral per-test
+deployments `gltest` creates internally) was made to studionet from the CLI and
+driven through the **full escrow lifecycle with real LLM consensus**. All
+transactions below executed with `execution_result = SUCCESS` and can be
+verified independently on studionet.
+
+**Network:** studionet — "Genlayer Studio Network", chainId **61999**, RPC
+`https://studio.genlayer.com/api` (explorer: `https://genlayer-explorer.vercel.app`)
+**Deployed contract address:** `0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`
+
+**Accounts used (both real, distinct signers):**
+
+| Role | Address | Signs |
+|---|---|---|
+| Client | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` | create / fund / dispute / resolve / accept |
+| Freelancer | `0xc603c2e0E58db94dB0A5754ba280cD6FB5Bfd669` | submit_delivery |
+
+The client key was supplied only via the `GENLAYER_PRIVATE_KEY` environment
+variable (`.env`, git-ignored — see [.gitignore](.gitignore)); it was never
+hardcoded, logged, or committed. `fund_escrow` sent a real 5 GEN native value
+transfer (`5000000000000000000` atto).
+
+**1 — Deploy via the CLI:**
+
+```bash
+genlayer network set studionet
+genlayer account import --name escrow-builder --private-key "$GENLAYER_PRIVATE_KEY"
+genlayer deploy --contract contracts/freelance_escrow.py
+```
+
+- Deploy tx hash: `0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58` (status ACCEPTED)
+
+**2 — A raw `genlayer write` (smoke test, id `job-cli-1`):**
+
+- `create_agreement` tx: `0x5aecd6456309a82c6d7a605b089fc408b83494d378c4e3b4c140478085f85ce8` (execution SUCCESS)
+
+**3 — Full lifecycle via the genlayer-py SDK** ([scripts/studionet_e2e_demo.py](scripts/studionet_e2e_demo.py)):
+
+`genlayer write` cannot attach native `msg.value`, so the value-bearing
+`fund_escrow` (and the whole flow) was driven through the SDK, which sends real
+consensus transactions. Run:
+
+```bash
+set -a; . ./.env; set +a          # loads GENLAYER_PRIVATE_KEY only
+python scripts/studionet_e2e_demo.py \
+    --contract-address 0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D \
+    --freelancer-keystore ~/.genlayer/keystores/cli-freelancer.json \
+    --freelancer-password-stdin
+```
+
+| Step | Method (signer) | Tx hash | Result |
+|---|---|---|---|
+| 1 | `create_agreement` (client) | `0x000b9e5b0476fad82bb1ce4192b082f2fb4ba5548254ed15542627fae22b2e06` | agreement stored, status `created` |
+| 2 | `fund_escrow` +5 GEN (client) | `0x50540ac44d0faf83210fa74420d3498a4104cc6dae89329f4280f9c0502ace29` | status `funded`, escrow pool credited |
+| 3 | `submit_delivery` (freelancer) | `0x36021b93d8a93e6df02ce33f2c073368c462af53767d134763fb00043d769bb2` | status `delivered` |
+| 4 | `raise_dispute` (client) | `0x56e7b952f41b3dde9306b965557085829452b3fe68f2b5a23114bfc5a7ea9297` | status `disputed` |
+| 5 | `resolve_dispute` (client) | `0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6` | **LLM arbitration through full validator consensus**, status `arbitrated` |
+| 6 | `accept_resolution` (client) | `0x306cf38ed10e434d811577187c2559c39d69cb2d03341b210d918e4e0de2ca67` | settlement credited to payout ledger |
+
+Final on-chain state read back after step 6:
+
+```json
+{ "status": "released", "judgment_decision": "release", "judgment_percent": 100, "appeal_count": 0 }
+```
+`escrow_pool = 5000000000000000000`, `freelancer_credit = 5000000000000000000`,
+`client_credit = 0` — and the script asserts
+`freelancer_credit + client_credit == escrow_amount` (payout conserves the
+escrow exactly). The validators independently re-ran the arbitration prompt and
+agreed on the `release` / `100%` decision, so `resolve_dispute` reaching
+`SUCCESS` is direct evidence the comparative validator produced consensus on
+real LLM output.
+
 ## Deploy (testnet)
 
 ```bash
@@ -249,6 +324,7 @@ genlayer receipt <txHash> --stdout --stderr    # lifecycle status ≠ execution 
 - ✅ Sender checks via `gl.message.sender_address` (the pinned SDK's name for the sender field; this SDK has no `sender_account` attribute); all rejections are `gl.vm.UserError` with prefixed messages — **no bare `Exception`**.
 - ✅ Appeal path: exactly one re-trigger of `resolve_dispute`.
 - ✅ `genvm-lint check` passes; 22 direct-mode tests pass; **both full-consensus integration tests pass live on StudioNet** (real validators independently re-ran the arbitration LLM prompt and agreed).
+- ✅ **Persistent studionet deployment** `0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D` driven through the entire lifecycle (deploy → create → fund w/ 5 GEN → deliver → dispute → **LLM-consensus arbitration** → settle), all tx `SUCCESS` — see [Studionet deployment & evidence](#studionet-deployment--evidence).
 
 ## License
 

@@ -15,6 +15,7 @@ __pycache__/
 .gltest_cache/
 genlayer.db*
 *.sqlite
+artifacts/
 
 # Secrets — never commit private keys
 .env
