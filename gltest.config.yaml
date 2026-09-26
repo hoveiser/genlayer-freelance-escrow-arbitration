@@ -1,0 +1,37 @@
+# gltest configuration for integration tests (full consensus).
+# Schema: root keys are networks / paths / environment.
+#
+# Replace the placeholder strings below with your LOCAL test account private
+# keys (or use "${ACCOUNT_PRIVATE_KEY_1}" env-var style references and export
+# them before running gltest — note the gltest pytest plugin validates env
+# vars at startup, so keep plain placeholders if you also run direct-mode
+# pytest in this repo). NEVER put keys that control real funds here, and never
+# commit real keys.
+#
+# Run with:  gltest tests/integration/ -v -s --network <name>
+paths:
+  contracts: contracts/
+
+networks:
+  # Which network `gltest` uses when --network is not passed.
+  default: studionet
+
+  localnet:
+    # Local Studio (`genlayer up`). NOT glsim — glsim cannot run this
+    # contract's pinned GenVM runner generation (see README).
+    accounts:
+      - "0xYOUR_LOCAL_ACCOUNT_KEY_1"
+      - "0xYOUR_LOCAL_ACCOUNT_KEY_2"
+
+  studionet:
+    # Hosted Studio at studio.genlayer.com — gasless, rate-limited per IP.
+    accounts:
+      - "0xYOUR_ACCOUNT_KEY_1"
+      - "0xYOUR_ACCOUNT_KEY_2"
+
+  testnet_bradbury:
+    # Real testnet — fund both accounts via
+    # https://testnet-faucet.genlayer.foundation/ before running.
+    accounts:
+      - "0xYOUR_FUNDED_ACCOUNT_KEY_1"
+      - "0xYOUR_FUNDED_ACCOUNT_KEY_2"

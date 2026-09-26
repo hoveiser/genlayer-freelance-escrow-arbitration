@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# GenLayer local tooling
+.gltest_cache/
+genlayer.db*
+*.sqlite
+
+# Secrets — never commit private keys
+.env
+*.key
+keystores/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
