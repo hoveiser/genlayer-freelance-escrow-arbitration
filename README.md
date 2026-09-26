@@ -8,6 +8,13 @@ leader's model output.
 Submitter entry for GenLayer's builder program, "Intelligent Contract"
 category. Contract-only submission (no frontend/backend).
 
+**Live evidence** — deployed and driven end-to-end on studionet (see
+[Studionet deployment & evidence](#studionet-deployment--evidence)):
+
+- Contract: `0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`
+- Deploy tx: `0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58`
+- LLM-consensus arbitration tx (`resolve_dispute`): `0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6`
+
 ## The use case
 
 1. A **client** drafts an agreement with a written spec and a deal amount,
