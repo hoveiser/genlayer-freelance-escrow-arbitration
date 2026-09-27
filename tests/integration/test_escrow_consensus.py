@@ -1,12 +1,16 @@
 """Integration tests: exercise the REAL consensus/validator path.
 
 Unlike Direct mode (leader-only), every write transaction here goes through
-full GenLayer consensus: a leader executes the contract (including the LLM
-arbitration prompt), and each validator INDEPENDENTLY re-runs
-`_run_arbitration_prompt` and compares decision fields (exact `decision`
-match + `percent` within SPLIT_TOLERANCE_PERCENT) via the custom validator in
-`FreelanceEscrow._arbitrate`. A transaction only succeeds if consensus agrees;
-disagreement triggers leader rotation until a quorum matches.
+full GenLayer consensus: a leader executes the contract (including its OWN
+fetch of the delivered artifact URL and the LLM arbitration prompt), and each
+validator INDEPENDENTLY re-runs `_run_arbitration_prompt` - its own web fetch,
+its own LLM call - and requires an EXACT match on the settlement label and
+evidence status via the custom validator in `FreelanceEscrow._arbitrate`.
+There is NO tolerance anywhere: the label set is fixed
+(RELEASE_FULL / REFUND_FULL / SPLIT_QUARTER / SPLIT_HALF /
+SPLIT_THREE_QUARTER) and the payout percent is derived from the label alone.
+A transaction only succeeds if consensus agrees; disagreement triggers leader
+rotation until a quorum matches.
 
 Run against a real environment (see README "Testing"):
 
@@ -19,6 +23,8 @@ GenVM runner generation (it doesn't execute real GenVM runners); see README.
 
 Marked `slow`: excluded from default runs with `-m "not slow"` if you want.
 """
+
+import json
 
 import pytest
 
@@ -35,6 +41,25 @@ SPEC = (
     "Build a single-page landing site with exactly three sections "
     "(hero, features, contact form) and deliver it as a public URL."
 )
+# The ONLY settlement outcomes the redesigned arbitration may produce, and
+# the exact payout behind each (label-derived - no continuum exists anymore).
+VALID_JUDGMENTS = {
+    "RELEASE_FULL": 100,
+    "REFUND_FULL": 0,
+    "SPLIT_QUARTER": 25,
+    "SPLIT_HALF": 50,
+    "SPLIT_THREE_QUARTER": 75,
+}
+VALID_EVIDENCE = ("fetched", "unreachable", "description_only")
+
+
+def _assert_consensus_judgment(ag):
+    """A stored judgment must be an exact fixed-set label with derived percent."""
+    assert ag["judgment_decision"] in VALID_JUDGMENTS
+    assert ag["judgment_percent"] == VALID_JUDGMENTS[ag["judgment_decision"]]
+    record = json.loads(ag["arbitration_history"][-1])
+    assert record["evidence_status"] in VALID_EVIDENCE
+    assert record["decision"] == ag["judgment_decision"]
 
 
 def _parties():
@@ -64,20 +89,26 @@ def _deliver_flow(contract, freelancer_contract, freelancer):
     )
     assert tx_execution_succeeded(
         freelancer_contract.submit_delivery(
-            args=[AGREEMENT_ID, "https://example.com - hero, features, contact form"]
+            args=[AGREEMENT_ID,
+                  "https://example.com - hero, features, contact form"]
         ).transact()
     )
+    # A URL was submitted, so the agreement carries externally-verifiable
+    # evidence; every evaluator fetches it independently during arbitration.
+    assert contract.get_agreement(args=[AGREEMENT_ID]).call()["delivery_url"] == \
+        "https://example.com"
     assert tx_execution_succeeded(
         contract.raise_dispute(args=[AGREEMENT_ID, "Client claims the contact form is missing"]).transact()
     )
 
 
 def test_dispute_arbitration_reaches_full_consensus():
-    """resolve_dispute must pass through leader + validator LLM re-execution.
+    """resolve_dispute must pass leader + validator fetch-and-judge consensus.
 
-    If the comparative validator were absent (or only schema-checked the
-    leader), this transaction would succeed even when validators disagree —
-    here, acceptance implies the decision fields actually agreed.
+    Validators each independently fetch the delivery URL and re-run the LLM
+    prompt; the transaction only succeeds when leader and validator produce
+    the EXACT SAME settlement label and evidence status - there is no
+    tolerance window left to paper over a disagreement.
     """
     client, freelancer = _parties()
     factory = get_contract_factory(CONTRACT)
@@ -88,15 +119,16 @@ def test_dispute_arbitration_reaches_full_consensus():
 
     receipt = contract.resolve_dispute(args=[AGREEMENT_ID]).transact()
     assert tx_execution_succeeded(receipt), (
-        "arbitration failed consensus — either validators disagreed on the "
-        "LLM judgment or the LLM call errored; inspect the receipt stdout/stderr"
+        "arbitration failed consensus - either validators did not agree on "
+        "the EXACT label/evidence status (no tolerance exists) or the "
+        "fetch/LLM call errored; inspect the receipt stdout/stderr"
     )
 
     ag = contract.get_agreement(args=[AGREEMENT_ID]).call()
     assert ag["status"] == "arbitrated"
-    assert ag["judgment_decision"] in ("release", "refund", "split")
-    assert 0 <= ag["judgment_percent"] <= 100
-    # Whatever the LLMs decided, the payout math must reproduce it exactly:
+    _assert_consensus_judgment(ag)
+    # Whatever the evaluators agreed on, the payout math must reproduce it
+    # exactly from the label-derived percent:
     freelancer_share = AMOUNT_ATTO * ag["judgment_percent"] // 100
     assert freelancer_share + (AMOUNT_ATTO - freelancer_share) == AMOUNT_ATTO
 
@@ -132,6 +164,7 @@ def test_appeal_re_runs_consensus_and_limit_is_enforced():
     expected_freelancer = AMOUNT_ATTO * second["judgment_percent"] // 100
     assert contract.get_withdrawable(args=[freelancer.address]).call() == expected_freelancer
 
-    # Sanity: the two consensus runs should not be wildly different —
-    # informational, LLM variance means we only assert both are valid judgments.
-    assert first["judgment_decision"] in ("release", "refund", "split")
+    # Sanity: both consensus runs must be exact fixed-set judgments - each
+    # one independently fetched + re-judged with zero tolerance.
+    _assert_consensus_judgment(first)
+    _assert_consensus_judgment(second)

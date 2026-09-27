@@ -5,7 +5,8 @@ This script drives a real deploy (or binds to an existing address) and runs a
 full escrow lifecycle on studio.genlayer.com through the genlayer-py SDK:
 
     create_agreement -> fund_escrow (native value) -> submit_delivery
-    -> raise_dispute -> resolve_dispute (LLM consensus) -> accept_resolution
+    -> raise_dispute -> resolve_dispute (independent URL fetch + LLM
+       consensus on one EXACT fixed settlement label) -> accept_resolution
 
 It uses TWO accounts so the sender checks are genuinely exercised:
   * CLIENT     - private key read from the GENLAYER_PRIVATE_KEY env var
@@ -34,11 +35,22 @@ from genlayer_py import create_client
 from genlayer_py.chains import studionet
 
 ENDPOINT = "https://studio.genlayer.com/api"
-STUDIO = "https://studio.genlayer.com"
+EXPLORER = "https://explorer-studio.genlayer.com"
 AMOUNT_ATTO = 5 * 10**18  # 5 GEN at atto scale
+
+# The only settlement outcomes the contract can produce (exact, label-derived).
+VALID_JUDGMENTS = {
+    "RELEASE_FULL": 100,
+    "REFUND_FULL": 0,
+    "SPLIT_QUARTER": 25,
+    "SPLIT_HALF": 50,
+    "SPLIT_THREE_QUARTER": 75,
+}
 
 SPEC = ("Build a single-page landing site with exactly three sections: hero, "
         "features, and contact form; deliver as a public URL.")
+# The URL inside the delivery is fetched INDEPENDENTLY by every evaluator
+# during arbitration - the submitter's words alone never decide the payout.
 DELIVERABLE = "https://example.com - hero, features, contact form delivered"
 DISPUTE_REASON = "Client claims the contact form section is missing from the page"
 
@@ -103,7 +115,7 @@ def main():
         # Bind by deploying only when no address was given (deploy path omitted
         # here: the README documents the `genlayer deploy` CLI as the deployer).
         sys.exit("pass --contract-address (deploy via: genlayer deploy ...)")
-    print(f"contract={address}  explore: {STUDIO} (contract/state views)")
+    print(f"contract={address}  explorer: {EXPLORER}/address/{address}")
 
     aid = f"job-{int(time.time()) % 100000}"
     hashes = {}
@@ -139,7 +151,14 @@ def main():
     print("\nfinal agreement state:")
     print(json.dumps({k: ag[k] for k in
                       ("status", "judgment_decision", "judgment_percent",
-                       "appeal_count")}, indent=2))
+                       "appeal_count", "delivery_url")}, indent=2))
+    record = json.loads(ag["arbitration_history"][-1])
+    print(f"arbitration record: decision={record['decision']} "
+          f"evidence_status={record['evidence_status']}")
+    assert record["decision"] in VALID_JUDGMENTS, "label outside fixed set!"
+    assert ag["judgment_decision"] == record["decision"]
+    assert ag["judgment_percent"] == VALID_JUDGMENTS[record["decision"]], \
+        "stored percent must EXACTLY equal the label-derived payout"
     print(f"escrow_pool={pool}  freelancer_credit={cred_f}  client_credit={cred_c}")
     assert cred_f + cred_c == AMOUNT_ATTO, "payout must equal the escrow exactly"
     print("\nOK: full lifecycle executed on studionet with real consensus.")

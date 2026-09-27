@@ -8,13 +8,14 @@ leader's model output.
 Submitter entry for GenLayer's builder program, "Intelligent Contract"
 category. Contract-only submission (no frontend/backend).
 
-**Live evidence** — deployed and driven end-to-end on studionet (see
+**Live evidence** — the corrected contract is deployed and driven end-to-end
+on studionet (see
 [Studionet deployment & evidence](#studionet-deployment--evidence);
 explorer: <https://explorer-studio.genlayer.com/>):
 
-- Contract: [`0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`](https://explorer-studio.genlayer.com/address/0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D)
-- Deploy tx: [`0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58`](https://explorer-studio.genlayer.com/tx/0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58)
-- LLM-consensus arbitration tx (`resolve_dispute`): [`0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6`](https://explorer-studio.genlayer.com/tx/0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6)
+- Contract: [`0xaAa1690AFDDC2c2b5889340B2B8C9BD35Bf1f976`](https://explorer-studio.genlayer.com/address/0xaAa1690AFDDC2c2b5889340B2B8C9BD35Bf1f976)
+- Deploy tx: [`0x99ed6eaa81930f9e7e0c62d8461a8930640de5a8842153f6431aa919795ffe75`](https://explorer-studio.genlayer.com/tx/0x99ed6eaa81930f9e7e0c62d8461a8930640de5a8842153f6431aa919795ffe75)
+- Arbitration tx (independent URL fetch + exact-label LLM consensus): [`0xf14b906ac25d15911c4128b4e3957e930ba3ac78bcf48ccd4844c5b56ff69d1b`](https://explorer-studio.genlayer.com/tx/0xf14b906ac25d15911c4128b4e3957e930ba3ac78bcf48ccd4844c5b56ff69d1b)
 
 ## The use case
 
@@ -24,9 +25,12 @@ explorer: <https://explorer-studio.genlayer.com/>):
 3. Either:
    - the client **approves** → funds are released in full, or
    - either party **raises a dispute** → the contract runs **on-chain
-     arbitration**: an LLM grades the delivered work against the original
-     spec, and the outcome (`release` / `refund` / percentage `split`) is
-     adopted only if GenLayer **validators reach consensus** on it.
+     arbitration**: every evaluator independently FETCHES the delivered
+     artifact (when the delivery included a URL) and an LLM grades that
+     fetched evidence against the original spec. The outcome must be exactly
+     one of five fixed settlement labels (`RELEASE_FULL` / `REFUND_FULL` /
+     `SPLIT_QUARTER` / `SPLIT_HALF` / `SPLIT_THREE_QUARTER`), adopted only if
+     GenLayer **validators reach consensus on the identical label**.
 4. A party that disagrees with the outcome may **appeal exactly once**
    (re-triggers the full consensus evaluation). After settlement each party
    **withdraws** its share as a native-token transfer.
@@ -49,40 +53,87 @@ The consensus-critical call is `_arbitrate()` in
 [contracts/freelance_escrow.py](contracts/freelance_escrow.py). Design
 decisions, in order:
 
-- **`strict_eq` is impossible.** Two byte-identical executions of the same
-  LLM prompt can return different text; requiring exact equality would
-  deadlock consensus forever.
+- **`strict_eq` over the raw result is impossible.** Two byte-identical
+  executions of the same LLM prompt / web fetch can return different text;
+  requiring exact equality of raw outputs would deadlock consensus forever.
+  Equivalence is therefore enforced on a **canonical, discrete result**, not
+  on raw text.
+- **Fixed, enumerable outcome set — no tolerance, anywhere.** The LLM must
+  pick exactly one of five labels: `RELEASE_FULL` (100%), `REFUND_FULL` (0%),
+  `SPLIT_QUARTER` (25%), `SPLIT_HALF` (50%), `SPLIT_THREE_QUARTER` (75%).
+  The payout percent is **derived from the label** by a deterministic
+  function (`_percent_for_decision`) and is **never parsed from LLM output**
+  — any `percent`-like number the model invents is ignored. Because money is
+  a pure function of the label, exact agreement on the label IS exact
+  agreement on the transfer. The previous design's ±15-point percentage
+  tolerance was removed on purpose: "close enough" is not a valid basis for
+  moving funds.
 - **Leader-output-only validation is rejected.** A validator that merely
   checks the leader's answer "is well-formed JSON with an allowed status"
   proves formatting, not agreement — the leader alone would be deciding who
   gets the money. This contract does not do that.
 - **Genuine comparative validation** (custom validator function via
   `gl.vm.run_nondet_unsafe`):
-  1. The leader runs `_run_arbitration_prompt(spec, work, dispute_reason)` —
-     a pure function of on-chain state, so every participant builds the
-     *exact same prompt*.
-  2. The output is pushed through one deterministic **normalization funnel**
-     (key aliasing, synonym mapping, percent coercion, and canonicalization
-     so that e.g. `split @ 100%` becomes `release`). The fields compared are
-     then a pure function of the model's semantic intent.
-  3. **Each validator independently re-runs the same prompt itself** and
-     compares only the **decision fields**:
-       - `decision` (`release`/`refund`/`split`) must match **exactly**, and
-       - `freelancer_percent` must agree within an **explicit integer
-         tolerance** (`SPLIT_TOLERANCE_PERCENT = 15`) because a split ratio
-         is a continuum where small LLM wobble is economically harmless.
-- **Errors force leader rotation.** If the leader's LLM call fails or its
-  output cannot be parsed, `_normalize_judgment` raises a `[LLM_ERROR]`-
-  prefixed `gl.vm.UserError`, and the validator **disagrees** (`return
-  False`) rather than accepting broken output — consensus re-runs with a new
-  leader. A validator whose own re-run fails also disagrees. Silent agreement
-  on garbage is never possible.
+  1. The leader runs `_run_arbitration_prompt(title, spec, work, url,
+     dispute_reason)` — a pure function of on-chain state: it performs its
+     own `gl.nondet.web.get` fetch of the delivery URL and its own
+     `gl.nondet.exec_prompt` LLM call.
+  2. The output is pushed through a deterministic **normalization funnel**
+     that accepts ONLY the five fixed labels (after formatting-only case /
+     space / hyphen normalization and key aliasing). Anything else raises
+     `[LLM_ERROR]`.
+  3. **Each validator independently re-runs that entire function — its own
+     fetch, its own LLM call — and the validator rule requires an EXACT
+     match** on both economic fields: `decision` (label) and
+     `evidence_status` (`fetched` / `unreachable` / `description_only`).
+     Any mismatch → `False` → leader rotation. There is no numeric band,
+     no rounding allowance, no "similar enough".
+- **Errors force leader rotation.** If the leader's call fails or its output
+  is malformed, `_handle_leader_error` re-runs the task rather than granting
+  the doubt; a validator whose own re-run fails also disagrees. Silent
+  agreement on garbage is never possible.
 - Money never touches the non-deterministic path: payouts are computed
-  deterministically from consensus-agreed integer fields
-  (`escrow_atto * percent // 100`).
+  deterministically from the consensus-agreed label
+  (`escrow_atto * percent // 100`, percent ∈ {0, 25, 50, 75, 100}).
 
 Every one of these rules is annotated with inline `WHY` comments at the point
 in the code where it applies.
+
+## Evidence acquisition & the refund-by-default policy
+
+A submitted delivery description or link is **claim, not evidence**. The
+contract no longer takes it on faith:
+
+- `submit_delivery` deterministically extracts the first `http(s)://` URL
+  from the delivery text into `delivery_url` (stored, viewable).
+- During arbitration, **every evaluator independently fetches that URL**
+  inside its own run (`_fetch_evidence` → `gl.nondet.web.get`). The leader
+  never hands a fetched copy to validators, and validators never trust the
+  submitter's self-description over the retrieved content. The fetched body
+  (capped at `MAX_EVIDENCE_CHARS = 8000`) is embedded in the LLM prompt and
+  explicitly weighted above the description.
+- **Fetch failure is explicit, never a silent pass.** A non-200 response or
+  a raised exception makes the evaluator return the deterministic fallback
+  `{decision: REFUND_FULL, evidence_status: "unreachable"}` **without
+  consulting the LLM**. If the leader can't fetch but a validator can, the
+  two disagree → leader rotates and the fetch is retried. Only when the
+  whole ring genuinely cannot retrieve the artifact do all evaluators
+  independently converge on `REFUND_FULL` — money returns to the client,
+  because **unverifiable work must not pay out**. (Volatile pages can cause
+  repeated disagreement; that is fail-safe by design: while evaluators
+  cannot agree on what the artifact is, no funds move.)
+- **Deliveries with no URL** (pure description text) remain allowed, stamped
+  `evidence_status: "description_only"` in the audit history. **This is a
+  deliberately lower-assurance path**: the LLM can only weigh the
+  submitter's own words against the spec, so there is nothing external to
+  independently verify, and a well-written lie is harder to catch. The
+  reasoning for still allowing it: many real deliverables (private repos,
+  design files handed over out-of-band, IRL consulting) legitimately have no
+  public URL, and both parties already agreed to the split-label economics
+  with full knowledge that only description-based evidence exists. The
+  status is preserved in `arbitration_history` so the weaker evidentiary
+  basis is always auditable, and clients who want hard verification can
+  write "deliver as a public URL" into the spec itself.
 
 ## Storage schema
 
@@ -106,16 +157,19 @@ Agreement (@allow_storage @dataclass)   # new fields may ONLY be appended
 ├── status: str                         # created|funded|delivered|disputed|
 │                                       # arbitrated|settled|released|refunded
 ├── dispute_reason: str
-├── judgment_decision: str              # release|refund|split|none
-├── judgment_percent: u256              # freelancer's share, 0..100
+├── judgment_decision: str              # RELEASE_FULL|REFUND_FULL|SPLIT_QUARTER|
+│                                       # SPLIT_HALF|SPLIT_THREE_QUARTER|none
+├── judgment_percent: u256              # DERIVED from the label (0/25/50/75/100)
 ├── judgment_analysis: str
 ├── created_at/funded_at/delivered_at/disputed_at/resolved_at: str
 │                                       # from consensus message datetime
 ├── appeal_count: u256                  # max 1
 ├── arbitration_nonce: u256
-├── arbitration_history: DynArray[str]  # json.dumps of every judgment, kept
-│                                       # even after appeal (auditable trail)
-└── client_credit_atto / freelancer_credit_atto: u256
+├── arbitration_history: DynArray[str]  # json.dumps of every judgment incl.
+│                                       # evidence_status, kept after appeal
+├── client_credit_atto / freelancer_credit_atto: u256
+└── delivery_url: str                   # APPENDED: first http(s) URL extracted
+                                        # from delivered_work at submit time
 ```
 
 Lifecycle: `created → funded → delivered → (released | disputed → arbitrated
@@ -130,7 +184,7 @@ fund movement explicit and auditable.
 |---|---|---|
 | `create_agreement(id, freelancer, title, spec, escrow_amount_atto)` | write | caller becomes client |
 | `fund_escrow(id)` | write | client only; `gl.message.value` must equal escrow exactly |
-| `submit_delivery(id, delivered_work)` | write | freelancer only |
+| `submit_delivery(id, delivered_work)` | write | freelancer only; first URL becomes independently fetchable evidence |
 | `approve_delivery(id)` | write | client only → full release |
 | `raise_dispute(id, reason)` | write | client or freelancer |
 | `resolve_dispute(id)` | write | client or freelancer; second call = appeal (max 1) |
@@ -178,17 +232,22 @@ scripts/setup_direct_test_cache.sh   # one-time; see note below
 pytest tests/direct/ -v
 ```
 
-**Coverage:** happy path with no dispute, dispute → full release, dispute →
-full refund, dispute → split (60/40), unauthorized-sender rejections for
-every role, the appeal path (one re-trigger, second rejected), state-machine
-guards, value validation, and LLM-output resilience (synonyms, stringified
-numbers, unparseable output aborting the transaction).
+**Coverage (29 tests):** happy path with no dispute, dispute → full release,
+full refund, and each split label with its exact 25/50/75% payout, unauthorized-sender
+rejections for every role, the appeal path (one re-trigger, second
+rejected), state-machine guards, value validation, deterministic URL
+extraction from deliveries, **evidence fetching** (fetched content proven to
+reach the prompt; 404/500 ⇒ deterministic `REFUND_FULL` fallback without the
+LLM being consulted; description-only deliveries stamped as such), and
+fixed-set output strictness (labels outside the five accepted values and
+unparseable output revert the arbitration; LLM-supplied percent numbers are
+ignored in favor of the label).
 
 > **Important caveat (also in the test file headers):** Direct mode executes
 > only the **leader** path of `run_nondet_unsafe`. The comparative validator
-> — independent LLM re-execution, decision-field comparison with tolerance,
-> error → disagreement → leader rotation — is **not** exercised by these
-> tests. Consensus behavior is covered by the integration tests below.
+> — independent fetch + LLM re-execution and the EXACT label/evidence match
+> (no tolerance) — is **not** exercised by these tests. Consensus behavior is
+> covered by the integration tests below.
 
 > **Cache note:** `genlayer-test`'s direct runner resolves the "latest" genvm
 > release and looks for an unversioned `genvm-universal.tar.xz` asset; the
@@ -222,29 +281,35 @@ gltest tests/integration/ -v -s --network testnet_bradbury
 drives the real flow with **two different signing accounts** (client and
 freelancer) and asserts:
 
-1. `resolve_dispute` passes **full leader+validator consensus** (acceptance
-   implies independent validators' normalized judgments agreed on the
-   decision label and the percent within tolerance), and
+1. `resolve_dispute` passes **full leader+validator consensus** — acceptance
+   implies independently-executing validators each fetched the delivery URL,
+   re-ran the LLM prompt, and agreed on the **exact same** settlement label
+   and evidence status (there is no tolerance band left to agree "within"),
+   and
 2. the **appeal** re-triggers consensus exactly once, the second appeal
    transaction fails execution, and settlement splits per the appealed
    judgment.
 
-> **Live verification status:** both integration tests above were run green
-> against **studio.genlayer.com** (real GenVM, real validators, real LLM
-> arbitration prompts — 2 passed, ~2.6 min). Deploy, schema pull, and every
-> write method executed through full consensus on the pinned runner.
+> **Live verification status:** both integration tests above were re-run
+> green against **studio.genlayer.com** against the REDESIGNED contract
+> (real GenVM, real validators, real independent URL fetches + LLM
+> arbitration with exact-label consensus — 2 passed in 165s). Deploy,
+> schema pull, and every write method executed through full consensus on
+> the pinned runner.
 
 ## Studionet deployment & evidence
 
-A **persistent, standalone deployment** (independent of the ephemeral per-test
-deployments `gltest` creates internally) was made to studionet from the CLI and
-driven through the **full escrow lifecycle with real LLM consensus**. All
-transactions below executed with `execution_result = SUCCESS` and can be
-verified independently on studionet.
+A **persistent, standalone deployment** of the REDESIGNED contract
+(independent of the ephemeral per-test deployments `gltest` creates
+internally) was made to studionet from the CLI and driven through the **full
+escrow lifecycle: real URL evidence fetching + exact-label LLM consensus**.
+All transactions below were re-verified against the explorer's own index
+(`/address/…` JSON payload) and every one shows status **FINALIZED**; they
+are all clickable in the tables.
 
 **Network:** studionet — "Genlayer Studio Network", chainId **61999**, RPC
 `https://studio.genlayer.com/api` (explorer: <https://explorer-studio.genlayer.com/>)
-**Deployed contract address:** [`0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D`](https://explorer-studio.genlayer.com/address/0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D)
+**Deployed contract address:** [`0xaAa1690AFDDC2c2b5889340B2B8C9BD35Bf1f976`](https://explorer-studio.genlayer.com/address/0xaAa1690AFDDC2c2b5889340B2B8C9BD35Bf1f976)
 
 **Accounts used (both real, distinct signers):**
 
@@ -262,15 +327,15 @@ transfer (`5000000000000000000` atto).
 
 ```bash
 genlayer network set studionet
-genlayer account import --name escrow-builder --private-key "$GENLAYER_PRIVATE_KEY"
-genlayer deploy --contract contracts/freelance_escrow.py
+genlayer account use escrow-builder
+echo "<keystore password>" | genlayer deploy --contract contracts/freelance_escrow.py
 ```
 
-- Deploy tx hash: [`0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58`](https://explorer-studio.genlayer.com/tx/0x3947e507d1939ecf64a23c534b75442a40bae2897c227cbe00e602f97170aa58) (status FINALIZED in the explorer index)
+- Deploy tx: [`0x99ed6eaa81930f9e7e0c62d8461a8930640de5a8842153f6431aa919795ffe75`](https://explorer-studio.genlayer.com/tx/0x99ed6eaa81930f9e7e0c62d8461a8930640de5a8842153f6431aa919795ffe75) — FINALIZED; RPC confirms the tx carries the pinned-runner header as its first source bytes
 
-**2 — A raw `genlayer write` (smoke test, id `job-cli-1`):**
+**2 — A raw `genlayer write` (smoke test, id `job-cli-2`):**
 
-- `create_agreement` tx: `0x5aecd6456309a82c6d7a605b089fc408b83494d378c4e3b4c140478085f85ce8` (execution SUCCESS)
+- `create_agreement` tx: [`0x1b3eff0d2834504a16504e8ff2f0fc0a77ade825ce6176a0e3bb08e82aad06e7`](https://explorer-studio.genlayer.com/tx/0x1b3eff0d2834504a16504e8ff2f0fc0a77ade825ce6176a0e3bb08e82aad06e7) — execution SUCCESS, FINALIZED
 
 **3 — Full lifecycle via the genlayer-py SDK** ([scripts/studionet_e2e_demo.py](scripts/studionet_e2e_demo.py)):
 
@@ -281,32 +346,57 @@ consensus transactions. Run:
 ```bash
 set -a; . ./.env; set +a          # loads GENLAYER_PRIVATE_KEY only
 python scripts/studionet_e2e_demo.py \
-    --contract-address 0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D \
+    --contract-address 0xaAa1690AFDDC2c2b5889340B2B8C9BD35Bf1f976 \
     --freelancer-keystore ~/.genlayer/keystores/cli-freelancer.json \
     --freelancer-password-stdin
 ```
 
+The delivery submitted was
+`"https://example.com - hero, features, contact form delivered"` — a
+**false claim** (example.com is a placeholder page). This is exactly the
+case the reviewer flagged, and the on-chain outcome proves the fix works
+end to end:
+
 | Step | Method (signer) | Tx hash (clickable — explorer) | Result |
 |---|---|---|---|
-| 1 | `create_agreement` (client) | [`0x000b9e5b0476fad82bb1ce4192b082f2fb4ba5548254ed15542627fae22b2e06`](https://explorer-studio.genlayer.com/tx/0x000b9e5b0476fad82bb1ce4192b082f2fb4ba5548254ed15542627fae22b2e06) | agreement stored, status `created` |
-| 2 | `fund_escrow` +5 GEN (client) | [`0x50540ac44d0faf83210fa74420d3498a4104cc6dae89329f4280f9c0502ace29`](https://explorer-studio.genlayer.com/tx/0x50540ac44d0faf83210fa74420d3498a4104cc6dae89329f4280f9c0502ace29) | status `funded`, escrow pool credited |
-| 3 | `submit_delivery` (freelancer) | [`0x36021b93d8a93e6df02ce33f2c073368c462af53767d134763fb00043d769bb2`](https://explorer-studio.genlayer.com/tx/0x36021b93d8a93e6df02ce33f2c073368c462af53767d134763fb00043d769bb2) | status `delivered` |
-| 4 | `raise_dispute` (client) | [`0x56e7b952f41b3dde9306b965557085829452b3fe68f2b5a23114bfc5a7ea9297`](https://explorer-studio.genlayer.com/tx/0x56e7b952f41b3dde9306b965557085829452b3fe68f2b5a23114bfc5a7ea9297) | status `disputed` |
-| 5 | `resolve_dispute` (client) | [`0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6`](https://explorer-studio.genlayer.com/tx/0xf3876e2e5d2ff202159d7bcbccc8d93626c2d8a148c520a9212a9b35a5a42fa6) | **LLM arbitration through full validator consensus**, status `arbitrated` |
-| 6 | `accept_resolution` (client) | [`0x306cf38ed10e434d811577187c2559c39d69cb2d03341b210d918e4e0de2ca67`](https://explorer-studio.genlayer.com/tx/0x306cf38ed10e434d811577187c2559c39d69cb2d03341b210d918e4e0de2ca67) | settlement credited to payout ledger |
+| 1 | `create_agreement` (client) | [`0xfffa2a436fe46595ff609992f57110129bdc33599b89b0f9f1eaa367a5f20461`](https://explorer-studio.genlayer.com/tx/0xfffa2a436fe46595ff609992f57110129bdc33599b89b0f9f1eaa367a5f20461) | agreement stored, status `created` |
+| 2 | `fund_escrow` +5 GEN (client) | [`0x1dcfbfe7da48f5db8940e4e0a57f62fde8e727c68f22a70377b3eb696f7ab4b7`](https://explorer-studio.genlayer.com/tx/0x1dcfbfe7da48f5db8940e4e0a57f62fde8e727c68f22a70377b3eb696f7ab4b7) | status `funded`, escrow pool credited |
+| 3 | `submit_delivery` (freelancer) | [`0xd7b3aa5c9e68b6ce494ba21559700f903f722fe175d10511660eb0aa484c28c6`](https://explorer-studio.genlayer.com/tx/0xd7b3aa5c9e68b6ce494ba21559700f903f722fe175d10511660eb0aa484c28c6) | status `delivered`, `delivery_url=https://example.com` extracted |
+| 4 | `raise_dispute` (client) | [`0xd6acdabacbe2ab6d0db8a323ce1fad5a3b48b5d77c655a318ff5b0835482d23e`](https://explorer-studio.genlayer.com/tx/0xd6acdabacbe2ab6d0db8a323ce1fad5a3b48b5d77c655a318ff5b0835482d23e) | status `disputed` |
+| 5 | `resolve_dispute` (client) | [`0xf14b906ac25d15911c4128b4e3957e930ba3ac78bcf48ccd4844c5b56ff69d1b`](https://explorer-studio.genlayer.com/tx/0xf14b906ac25d15911c4128b4e3957e930ba3ac78bcf48ccd4844c5b56ff69d1b) | **every evaluator fetched the URL itself, LLM judged the FETCHED content, validators agreed on the exact label `REFUND_FULL`**, status `arbitrated` |
+| 6 | `accept_resolution` (client) | [`0xa053bd1e916b030bc3507222e649654242e737d4e5ad92a0002f326e32ba6536`](https://explorer-studio.genlayer.com/tx/0xa053bd1e916b030bc3507222e649654242e737d4e5ad92a0002f326e32ba6536) | settlement credited to payout ledger |
 
-Final on-chain state read back after step 6:
+Final on-chain state read back after step 6 (asserted by the script):
 
 ```json
-{ "status": "released", "judgment_decision": "release", "judgment_percent": 100, "appeal_count": 0 }
+{
+  "status": "refunded",
+  "judgment_decision": "REFUND_FULL",
+  "judgment_percent": 0,
+  "appeal_count": 0,
+  "delivery_url": "https://example.com"
+}
 ```
-`escrow_pool = 5000000000000000000`, `freelancer_credit = 5000000000000000000`,
-`client_credit = 0` — and the script asserts
-`freelancer_credit + client_credit == escrow_amount` (payout conserves the
-escrow exactly). The validators independently re-ran the arbitration prompt and
-agreed on the `release` / `100%` decision, so `resolve_dispute` reaching
-`SUCCESS` is direct evidence the comparative validator produced consensus on
-real LLM output.
+
+arbitration history record: `decision=REFUND_FULL`,
+**`evidence_status=fetched`** — the artifact really was retrieved during
+consensus. `escrow_pool = 5000000000000000000`, `freelancer_credit = 0`,
+`client_credit = 5000000000000000000`, and the script asserts
+`freelancer_credit + client_credit == escrow_amount` plus
+`judgment_percent == 0` (the exact payout derived from the label).
+
+> Note what this run demonstrates: the delivery description *claimed* the
+> spec was fulfilled, but the contract did not trust the claim — the
+> evaluators fetched `https://example.com`, saw a placeholder domain page,
+> and independently reached the **same exact label** `REFUND_FULL`, so the
+> client got 100% back. Under the old tolerance-based design a 15-point band
+> could have absorbed this kind of disagreement; now the transaction only
+> finalized because two independent judgments (fetch + LLM) matched exactly
+> on the label and evidence status.
+
+**Explorer verification** (re-checked after this run): the contract page
+index lists all 8 transactions above (deploy, smoke write, 6-step
+lifecycle), each with `"status":"FINALIZED"`.
 
 ## Deploy (testnet)
 
@@ -324,15 +414,15 @@ genlayer receipt <txHash> --stdout --stderr    # lifecycle status ≠ execution 
 ## Verification checklist (submission requirements)
 
 - ✅ Line 1 is a pinned runner header — **no** `py-genlayer:test` / `:latest` / unversioned.
-- ✅ Dispute judgment uses a **custom comparative validator** (`run_nondet_unsafe`): validators re-run the same prompt and compare `decision` (exact) + `percent` (±15 tolerance). **No `strict_eq` on LLM output.**
-- ✅ **No leader-output-only/schema validation** anywhere on the judgment path.
-- ✅ LLM errors / unparseable output ⇒ validator returns `False` ⇒ leader rotation.
+- ✅ Dispute judgment uses a **custom comparative validator** (`run_nondet_unsafe`): validators independently fetch the delivery URL, re-run the prompt, and require an **EXACT match on the fixed settlement label + evidence status**. **No tolerance anywhere; no `strict_eq` on raw LLM/web output.**
+- ✅ **No leader-output-only/schema validation** anywhere on the judgment path; outputs outside the five fixed labels (or unparseable) ⇒ validator returns `False` ⇒ leader rotation.
+- ✅ Delivered URLs are **fetched independently by every evaluator** (`gl.nondet.web.get` inside its own run — no shared fetched copy); unreachable artifacts fall back **by consensus** to `REFUND_FULL` (refund-by-default), never a silent pass.
 - ✅ Typed storage only (`TreeMap`/`DynArray`), `Agreement` dataclass, statuses as `str` (no `Enum` stored), fields append-only.
-- ✅ Money is atto-scale `u256` integer math throughout; **no float is ever used to represent or move funds**. (The only `float()` in the file transiently coerces the LLM's percent *text* — e.g. `"60"`/`"60.0"` — to an int via `int(round(...))`, then clamps to 0-100; it never touches the balance ledger.)
+- ✅ Money is atto-scale `u256` integer math throughout; **no float is ever used to represent or move funds** — after the redesign the contract contains **no `float()` at all**: settlement values come only from the integer label→percent mapping.
 - ✅ Sender checks via `gl.message.sender_address` (the pinned SDK's name for the sender field; this SDK has no `sender_account` attribute); all rejections are `gl.vm.UserError` with prefixed messages — **no bare `Exception`**.
 - ✅ Appeal path: exactly one re-trigger of `resolve_dispute`.
-- ✅ `genvm-lint check` passes; 22 direct-mode tests pass; **both full-consensus integration tests pass live on StudioNet** (real validators independently re-ran the arbitration LLM prompt and agreed).
-- ✅ **Persistent studionet deployment** `0xc30D7b387d9B1a24a5b52F06AB0455C221fFdd4D` driven through the entire lifecycle (deploy → create → fund w/ 5 GEN → deliver → dispute → **LLM-consensus arbitration** → settle), all tx `SUCCESS` — see [Studionet deployment & evidence](#studionet-deployment--evidence).
+- ✅ `genvm-lint check` passes; 29 direct-mode tests pass; **both full-consensus integration tests pass live on StudioNet** (real validators independently fetched + re-judged and agreed on the exact label).
+- ✅ **Persistent studionet deployment** `0xaAa1690AFDDC2c2b5889340B2B8C9BD35Bf1f976` (the corrected contract) driven through the entire lifecycle (deploy → create → fund w/ 5 GEN → deliver w/ URL → dispute → **fetch + exact-label LLM consensus arbitration** → settle), all tx FINALIZED on the explorer — see [Studionet deployment & evidence](#studionet-deployment--evidence).
 
 ## License
 

@@ -5,20 +5,27 @@ Freelance Escrow with AI Consensus Arbitration - GenLayer Intelligent Contract.
 
 A client deposits native-token funds into escrow for a freelancer to complete a
 defined task described by a written spec. On delivery, either party can raise a
-dispute. When disputed, GenLayer validators INDEPENDENTLY evaluate the delivered
-work against the original spec using LLM-based comparative judgment, and the
-contract releases funds (full release to freelancer, full refund to client, or
-a percentage split) based on VALIDATOR CONSENSUS - not a single party's claim
-and not a single leader's LLM answer.
+dispute. When disputed, GenLayer validators INDEPENDENTLY fetch the delivered
+artifact (when it was submitted as a URL) and evaluate it against the original
+spec using LLM-based comparative judgment, and the contract releases funds
+based on VALIDATOR CONSENSUS - not a single party's claim and not a single
+leader's LLM answer.
+
+Settlement outcomes form a small FIXED label set (RELEASE_FULL / REFUND_FULL /
+SPLIT_QUARTER / SPLIT_HALF / SPLIT_THREE_QUARTER). Because the chosen label
+DIRECTLY determines each party's native-token transfer, validators must agree
+on the EXACT SAME label - there is deliberately NO numeric tolerance anywhere
+in the consensus path.
 
 Why GenLayer consensus is necessary here
 -----------------------------------------
 The arbitration decision directly moves real money (an atto-scale u256 payout
-split). An LLM judgment is non-deterministic external input: if we trusted one
-leader's LLM output, the leader could rug the escrow and no one would notice.
-So every arbitration goes through leader + validator re-execution of the SAME
-evaluation with a field-level agreement rule (see `_arbitrate` below), which is
-exactly what GenLayer's equivalence-principle machinery is for.
+split). An LLM judgment and a web fetch are non-deterministic external inputs:
+if we trusted one leader's output, the leader could rug the escrow and no one
+would notice. So every arbitration goes through leader + validator
+re-execution of the SAME fetch-and-evaluate routine with an exact-agreement
+rule on the settlement label (see `_arbitrate` below), which is exactly what
+GenLayer's equivalence-principle machinery is for.
 
 Money convention: every value is an integer in ATTO scale (1 token = 10**18).
 Never use floats for money or for anything crossing the consensus boundary.
@@ -56,13 +63,66 @@ STATUS_REFUNDED = "refunded"      # client never funded / cancelled before fundi
 # Maximum number of re-arbitrations (appeals) allowed per agreement.
 MAX_APPEALS = 1
 
-# Split-ratio agreement tolerance, in integer percentage points. Two
-# independent LLM runs of the *same* arbitration prompt can legitimately
-# land on 70% vs 65% for the freelancer; demanding bit-exact equality on the
-# ratio would deadlock consensus, while accepting wildly different ratios
-# would let a bad leader through. 15 points is the pragmatic band - the
-# *decision label* (release/refund/split) must still match EXACTLY.
-SPLIT_TOLERANCE_PERCENT = 15
+# ---------------------------------------------------------------------------
+# Settlement outcomes - a small FIXED, enumerable label set.
+#
+# Design decision (reviewer-driven): the earlier design let the LLM emit a
+# free-form 0-100 percentage and the comparative validator accepted leader /
+# validator percentages differing by up to 15 points. That was wrong on
+# purpose: the percentage DIRECTLY determines each party's token transfer, so
+# "close enough" is not an acceptable consensus basis for moving money.
+# Validators must now produce the EXACT SAME label; the transfer amount is a
+# deterministic pure function of that label (_percent_for_decision). There is
+# no tolerance anywhere in the consensus comparison.
+# ---------------------------------------------------------------------------
+DECISION_RELEASE_FULL = "RELEASE_FULL"                # freelancer gets 100%
+DECISION_REFUND_FULL = "REFUND_FULL"                  # client gets 100% back
+DECISION_SPLIT_QUARTER = "SPLIT_QUARTER"              # freelancer gets 25%
+DECISION_SPLIT_HALF = "SPLIT_HALF"                    # freelancer gets 50%
+DECISION_SPLIT_THREE_QUARTER = "SPLIT_THREE_QUARTER"  # freelancer gets 75%
+
+VALID_DECISIONS = (
+    DECISION_RELEASE_FULL,
+    DECISION_REFUND_FULL,
+    DECISION_SPLIT_QUARTER,
+    DECISION_SPLIT_HALF,
+    DECISION_SPLIT_THREE_QUARTER,
+)
+
+
+def _percent_for_decision(decision: str) -> int:
+    """The payout split behind a settlement label - deterministic, integer.
+
+    Because the percent is DERIVED from the label (and never parsed from LLM
+    output), exact agreement on the label implies exact agreement on the
+    money. Any caller that could reach this with a non-label is a programming
+    bug, surfaced as a deterministic [EXPECTED] error.
+    """
+    if decision == DECISION_RELEASE_FULL:
+        return 100
+    if decision == DECISION_REFUND_FULL:
+        return 0
+    if decision == DECISION_SPLIT_QUARTER:
+        return 25
+    if decision == DECISION_SPLIT_HALF:
+        return 50
+    if decision == DECISION_SPLIT_THREE_QUARTER:
+        return 75
+    raise gl.vm.UserError(f"{ERROR_EXPECTED} unknown settlement decision '{decision}'")
+
+
+# ---------------------------------------------------------------------------
+# Evidence acquisition modes for arbitration (see _run_arbitration_prompt).
+# A delivery that includes a URL is only judged against content the evaluator
+# fetched WITH ITS OWN EYES; no fetched copy is ever handed between parties.
+# ---------------------------------------------------------------------------
+EVIDENCE_FETCHED = "fetched"                  # URL retrieved successfully
+EVIDENCE_UNREACHABLE = "unreachable"          # URL present but not retrievable
+EVIDENCE_DESCRIPTION_ONLY = "description_only"  # no URL: lower-assurance path
+
+# Cap on fetched content fed into the prompt (bounded prompt = bounded
+# non-determinism and predictable validator cost).
+MAX_EVIDENCE_CHARS = 8000
 
 # Placeholder used before any arbitration exists.
 JUDGMENT_NONE = "none"
@@ -87,8 +147,8 @@ class Agreement:
     delivered_work: str          # deliverable text / description / link submitted by freelancer
     status: str                  # one of STATUS_* above - str, never Enum
     dispute_reason: str          # set by whichever party raised the dispute
-    judgment_decision: str       # "release" | "refund" | "split" | "none"
-    judgment_percent: u256       # percent of escrow awarded to the freelancer (0..100)
+    judgment_decision: str       # one of DECISION_* labels (or JUDGMENT_NONE before arbitration)
+    judgment_percent: u256       # payout percent to the freelancer, DERIVED from the label
     judgment_analysis: str       # latest LLM reasoning, informational only
     created_at: str              # ISO-8601 timestamp of creation
     funded_at: str               # ISO-8601 timestamp of escrow funding ("" until funded)
@@ -100,6 +160,9 @@ class Agreement:
     arbitration_history: DynArray[str]  # json.dumps() of each arbitration record, in order
     client_credit_atto: u256     # unsettled refund credit owed to the client (atto)
     freelancer_credit_atto: u256 # unsettled release credit owed to the freelancer (atto)
+    delivery_url: str            # externally-hosted evidence URL extracted from
+                                 # delivered_work at submission time ("" if none).
+                                 # APPENDED at the end per the layout rule above.
 
 
 def _account_key(account) -> str:
@@ -125,30 +188,42 @@ def _now_iso() -> str:
     return str(gl.message_raw["datetime"])
 
 
-def _clamp_percent(raw) -> int:
-    """Coerce an LLM-supplied percent to an integer in 0..100."""
-    try:
-        pct = int(round(float(str(raw).strip())))
-    except (ValueError, TypeError):
-        raise gl.vm.UserError(f"{ERROR_LLM} Non-numeric percent: {raw!r}")
-    if pct < 0:
-        pct = 0
-    if pct > 100:
-        pct = 100
-    return pct
+def _extract_delivery_url(delivered_work: str) -> str:
+    """Deterministically pull the first http(s) URL out of a delivery string.
+
+    Runs in the DETERMINISTIC context at submit time, so only plain str
+    operations are used (no regex module, no nondeterminism). If multiple
+    links are pasted, only the first is treated as externally-verifiable
+    evidence; the remainder is judged as description text.
+    """
+    pos = delivered_work.find("https://")
+    if pos == -1:
+        pos = delivered_work.find("http://")
+    if pos == -1:
+        return ""
+    end = len(delivered_work)
+    i = pos
+    while i < end:
+        ch = delivered_work[i]
+        if (ch == " " or ch == "\t" or ch == "\n" or ch == '"'
+                or ch == "'" or ch == "<" or ch == ">" or ch == "`"):
+            end = i
+            break
+        i += 1
+    return delivered_work[pos:end]
 
 
 def _normalize_judgment(raw) -> dict:
-    """Defensively parse and CANONICALIZE the LLM arbitration output.
+    """Parse the LLM arbitration answer into a canonical settlement record.
 
-    Why normalization exists (equivalence-principle context):
-    Validators compare *decision fields* of independently produced LLM answers.
-    LLMs use alternate key names and sometimes emit verdicts inconsistent with
-    their own percent (e.g. decision="split", percent=100). By forcing the
-    output through one deterministic normalization funnel, the fields the
-    validator compares (decision + percent) become a pure function of the
-    model's semantic intent - so two near-identical answers normalize to
-    identical fields, and only genuinely different judgments diverge.
+    The ONLY accepted answers are the five fixed DECISION_* labels. Common
+    formatting noise is normalized away (string-vs-dict, key aliasing, case,
+    spaces/hyphens), but SEMANTICS are never approximated: a label outside
+    the fixed set, a missing field, or unparseable JSON raises ERROR_LLM so
+    the validator refuses to agree and the leader rotates. The payout percent
+    is DERIVED from the label via _percent_for_decision - raw percent-like
+    numbers in LLM output are deliberately ignored, because the label IS the
+    economics.
     """
     if isinstance(raw, str):
         # Some backends hand back a raw string even with response_format=json;
@@ -176,81 +251,129 @@ def _normalize_judgment(raw) -> dict:
     if decision_raw is None:
         raise gl.vm.UserError(f"{ERROR_LLM} Missing 'decision'. Keys: {list(raw.keys())}")
 
-    percent_raw = lowered.get("freelancer_percent")
-    if percent_raw is None:
-        for alt in ("percent", "split_percent", "freelancer_share",
-                    "percent_to_freelancer", "share"):
-            if alt in lowered:
-                percent_raw = lowered[alt]
-                break
-    if percent_raw is None:
-        # A missing percent is harmless for the two extreme verdicts, whose
-        # percent is implied (100 / 0); for a split it defaults to a neutral
-        # middle, which canonicalization below may still adjust.
-        percent_raw = 50
-
-    decision = str(decision_raw).strip().lower()
-    # Map common synonyms onto the three canonical decisions.
-    if decision in ("release", "released", "full_release", "pay", "fulfilled", "complete"):
-        decision = "release"
-    elif decision in ("refund", "refunded", "full_refund", "reject", "rejected", "failed"):
-        decision = "refund"
-    elif decision in ("split", "partial", "partial_release", "partial_refund", "mixed"):
-        decision = "split"
-    else:
-        raise gl.vm.UserError(f"{ERROR_LLM} Unknown decision: {decision_raw!r}")
-
-    pct = _clamp_percent(percent_raw)
-
-    # Canonicalize: decision and percent must describe the same economics.
-    # release => pct is 100, refund => pct is 0, split => strictly between.
-    if decision == "release":
-        pct = 100
-    elif decision == "refund":
-        pct = 0
-    else:  # split
-        if pct <= 0:
-            decision, pct = "refund", 0
-        elif pct >= 100:
-            decision, pct = "release", 100
+    # Normalize formatting only (case / spaces / hyphens), then require an
+    # EXACT member of the fixed label set. Anything else is malformed output.
+    label = str(decision_raw).strip().upper().replace(" ", "_").replace("-", "_")
+    if label not in VALID_DECISIONS:
+        raise gl.vm.UserError(
+            f"{ERROR_LLM} decision label not in fixed set: {decision_raw!r}"
+        )
 
     analysis = str(lowered.get("analysis") or lowered.get("reasoning") or lowered.get("reason") or "")
     if len(analysis) > 2000:
         analysis = analysis[:2000]
 
-    return {"decision": decision, "percent": pct, "analysis": analysis}
+    return {
+        "decision": label,
+        "percent": _percent_for_decision(label),
+        "analysis": analysis,
+    }
+
+
+def _fetch_evidence(url: str) -> dict:
+    """Independently retrieve the externally-hosted delivered artifact.
+
+    CONSENSUS-CRITICAL PROPERTY: every evaluator (the leader AND each
+    validator) runs this INSIDE its own execution of
+    `_run_arbitration_prompt` - nobody fetches once and hands a copy to the
+    others. A delivery is trusted only as far as each evaluator has seen the
+    content with its own eyes.
+
+    A fetch failure is a RESULT ({"ok": False}), not an exception, so it is
+    comparable: if the leader cannot fetch but a validator can, their
+    conclusions differ and consensus disagrees (leader rotates, retry).
+    When the whole ring cannot fetch, everyone independently lands on the
+    same REFUND_FULL fallback - real consensus, never a silent pass.
+    """
+    try:
+        res = gl.nondet.web.get(url)
+        status = int(res.status)
+        body = res.body
+    except Exception:
+        return {"ok": False, "content": ""}
+    if status != 200:
+        # 4xx: the artifact simply is not there. 5xx / redirects: unreliable.
+        # All are treated as not-verifiable; transient disagreements rotate
+        # the leader, while a persistently dead URL consensus-refunds.
+        return {"ok": False, "content": ""}
+    try:
+        text = str(body, errors="replace")
+    except Exception:
+        return {"ok": False, "content": ""}
+    return {"ok": True, "content": text[:MAX_EVIDENCE_CHARS]}
 
 
 def _run_arbitration_prompt(title: str, spec: str, delivered_work: str,
-                            dispute_reason: str) -> dict:
-    """LEADER-SIDE function: run the LLM arbitration and return normalized fields.
+                            delivery_url: str, dispute_reason: str) -> dict:
+    """LEADER-SIDE function: fetch evidence, run LLM arbitration, return
+    normalized fields.
 
     This is deliberately a *pure function of its arguments*: the exact same
-    arguments produce the exact same prompt string. Validators re-execute this
-    very function themselves with the same inputs - that is the only way they
-    can form an INDEPENDENT candidate judgment rather than trusting the leader.
+    arguments produce the exact same prompt string. Validators re-execute
+    this very function themselves with the same inputs - including their own
+    fresh fetch of `delivery_url` - so they form an INDEPENDENT candidate
+    judgment rather than trusting the leader's retrieved content or answer.
     """
+    if delivery_url != "":
+        fetched = _fetch_evidence(delivery_url)
+        if not fetched["ok"]:
+            # Deterministic fallback policy - NO LLM is consulted: work whose
+            # external artifact cannot be retrieved must not be paid out.
+            # Both evaluators reach this branch only from their OWN failed
+            # fetch, so exact agreement here (REFUND_FULL + "unreachable")
+            # is genuine consensus about the unverifiable, not a pass.
+            return {
+                "decision": DECISION_REFUND_FULL,
+                "percent": 0,
+                "evidence_status": EVIDENCE_UNREACHABLE,
+                "analysis": (
+                    "The delivery URL could not be retrieved by the evaluator; "
+                    "under the refund-by-default policy for unverifiable work "
+                    "the escrow is returned to the client."
+                ),
+            }
+        evidence_block = (
+            "EXTERNALLY FETCHED ARTIFACT - retrieved directly from "
+            f"{delivery_url} by THIS evaluator (not the submitter's words):\n"
+            f"{fetched['content']}\n\n"
+        )
+        evidence_status = EVIDENCE_FETCHED
+    else:
+        # Lower-assurance path: nothing external to verify, the LLM can only
+        # weigh the submitter's own description against the spec. Deliberately
+        # still allowed - see README "Evidence acquisition" for the reasoning.
+        evidence_block = ""
+        evidence_status = EVIDENCE_DESCRIPTION_ONLY
+
     prompt = (
         "You are an impartial arbitration expert for a freelance escrow platform. "
         "Evaluate the delivered work strictly against the agreed written spec and "
-        "decide how the escrowed funds should be split.\n\n"
+        "choose exactly ONE settlement outcome for the escrowed funds.\n\n"
         f"TASK TITLE:\n{title}\n\n"
         f"WRITTEN SPEC (the binding agreement):\n{spec}\n\n"
-        f"DELIVERED WORK (text or link provided by the freelancer):\n{delivered_work}\n\n"
+        f"DELIVERY SUBMITTED BY THE FREELANCER (description text):\n{delivered_work}\n\n"
+        f"{evidence_block}"
         f"DISPUTE REASON RAISED BY A PARTY (claim only, not evidence):\n{dispute_reason}\n\n"
-        "Judge ONLY on how well the delivered work satisfies the spec. Treat party "
-        "claims skeptically. Decide one of:\n"
-        "- 'release': the work substantially fulfills the spec (freelancer gets 100%)\n"
-        "- 'refund': the work fails to fulfill the spec (client gets 100% back)\n"
-        "- 'split': the work partially fulfills the spec (freelancer gets "
-        "freelancer_percent, client gets the rest; 0 < freelancer_percent < 100)\n\n"
+        "Judge ONLY on how well the delivered/fetched work satisfies the spec. "
+        "Treat party claims skeptically. You MUST choose exactly ONE of these "
+        "fixed labels (no numbers, no other words):\n"
+        "- RELEASE_FULL: the work substantially fulfills the spec "
+        "(freelancer receives 100%)\n"
+        "- REFUND_FULL: the work fails to fulfill the spec "
+        "(client receives 100% back)\n"
+        "- SPLIT_QUARTER: clearly partial fulfillment, low credit to the work "
+        "(freelancer 25% / client 75%)\n"
+        "- SPLIT_HALF: roughly half the spec fulfilled (freelancer 50%)\n"
+        "- SPLIT_THREE_QUARTER: nearly complete with minor gaps "
+        "(freelancer 75%)\n\n"
         "Respond with ONLY a JSON object of this exact shape:\n"
-        '{"decision": "release" | "refund" | "split", '
-        '"freelancer_percent": <integer 0-100>, '
+        '{"decision": "<one label verbatim>", '
         '"analysis": "<short objective explanation>"}'
     )
     raw = gl.nondet.exec_prompt(prompt, response_format="json")
-    return _normalize_judgment(raw)
+    judgment = _normalize_judgment(raw)
+    judgment["evidence_status"] = evidence_status
+    return judgment
 
 
 def _handle_leader_error(leaders_res, leader_fn) -> bool:
@@ -348,6 +471,7 @@ class FreelanceEscrow(gl.Contract):
             arbitration_history=[],  # coerced to a stored DynArray on assignment
             client_credit_atto=0,
             freelancer_credit_atto=0,
+            delivery_url="",
         )
         self.agreement_ids.append(agreement_id)
 
@@ -379,7 +503,12 @@ class FreelanceEscrow(gl.Contract):
 
     @gl.public.write
     def submit_delivery(self, agreement_id: str, delivered_work: str) -> None:
-        """Freelancer submits the deliverable (text, description, or link)."""
+        """Freelancer submits the deliverable (text, description, or link).
+
+        A URL inside the submission is NOT trusted content - it is only the
+        ADDRESS of evidence. During arbitration every evaluator fetches that
+        URL itself (_fetch_evidence); nothing fetched is stored or passed on.
+        """
         ag = self._get(agreement_id)
         if gl.message.sender_address != ag.freelancer:
             raise gl.vm.UserError("ESCROW: only the freelancer can submit delivery")
@@ -389,6 +518,7 @@ class FreelanceEscrow(gl.Contract):
             raise gl.vm.UserError("ESCROW: delivered_work must not be empty")
 
         ag.delivered_work = delivered_work
+        ag.delivery_url = _extract_delivery_url(delivered_work)
         ag.status = STATUS_DELIVERED
         ag.delivered_at = _now_iso()
         self.agreements[agreement_id] = ag
@@ -402,7 +532,7 @@ class FreelanceEscrow(gl.Contract):
         if ag.status != STATUS_DELIVERED:
             raise gl.vm.UserError(f"ESCROW: cannot approve in status '{ag.status}'")
 
-        ag.judgment_decision = "release"
+        ag.judgment_decision = DECISION_RELEASE_FULL
         ag.judgment_percent = 100
         ag.judgment_analysis = "Client approved delivery off-chain; no arbitration."
         ag.resolved_at = _now_iso()
@@ -454,7 +584,8 @@ class FreelanceEscrow(gl.Contract):
         else:
             raise gl.vm.UserError(f"ESCROW: nothing to arbitrate in status '{ag.status}'")
 
-        judgment = self._arbitrate(ag.title, ag.spec, ag.delivered_work, ag.dispute_reason)
+        judgment = self._arbitrate(ag.title, ag.spec, ag.delivered_work,
+                                   ag.delivery_url, ag.dispute_reason)
 
         ag.judgment_decision = judgment["decision"]
         ag.judgment_percent = judgment["percent"]
@@ -465,6 +596,7 @@ class FreelanceEscrow(gl.Contract):
             "nonce": ag.arbitration_nonce,
             "decision": judgment["decision"],
             "percent": judgment["percent"],
+            "evidence_status": judgment["evidence_status"],
             "analysis": judgment["analysis"],
             "at": ag.resolved_at,
         }))
@@ -472,56 +604,61 @@ class FreelanceEscrow(gl.Contract):
         self.agreements[agreement_id] = ag
 
     def _arbitrate(self, title: str, spec: str, delivered_work: str,
-                   dispute_reason: str) -> dict:
-        """Consensus-wrapped LLM arbitration using a CUSTOM comparative validator.
+                   delivery_url: str, dispute_reason: str) -> dict:
+        """Consensus-wrapped fetch + LLM arbitration, CUSTOM comparative validator.
 
         WHY this shape - the equivalence principle, in its own words:
-        1. `strict_eq` is impossible here: two byte-identical LLM calls can
-           return different text, so exact equality would deadlock consensus.
+        1. `strict_eq` is impossible over the whole result: two runs of the
+           same prompt/web call can return different text, so byte-equality
+           would deadlock consensus.
         2. Validating only the LEADER's output (is it JSON? is the decision a
            known string?) is NOT consensus - the leader alone would be
-           deciding who gets the money, and any confidently-worded wrong (or
-           bribed) answer would pass. That pattern is explicitly rejected.
+           deciding who gets the money. Explicitly rejected.
         3. So each VALIDATOR independently re-runs the very same
-           `_run_arbitration_prompt(...)` - same prompt, same inputs taken
-           from on-chain state, which every validator reads identically - and
-           we compare only the DECISION FIELDS of the two independent
-           judgments:
-             * `decision` must match EXACTLY (release/refund/split), and
-             * the numeric `percent` must agree within SPLIT_TOLERANCE_PERCENT
-               because a ratio is a continuum where small LLM wobble is
-               semantically harmless - the tolerance is explicit, integer,
-               and applied AFTER canonicalization.
-        4. If the leader's call errored or its output could not be parsed
-           (parsed output never leaves `_run_arbitration_prompt` - it raises
-           ERROR_LLM instead), the validator DISAGREES by returning False,
-           which forces leader rotation instead of quietly accepting a broken
-           settlement path.
+           `_run_arbitration_prompt(...)` - its OWN fetch of the delivery URL
+           and its OWN LLM call - and we require EXACT agreement on every
+           economic field of the two independent judgments:
+             * `decision` must be an EXACT member of the fixed label set, and
+             * leader and validator labels must be IDENTICAL - no tolerance,
+               none, anywhere: the label directly determines an on-chain
+               token transfer, so "close enough" is not a valid basis for
+               moving money. Percent cannot smuggle in wobble because it is
+               DERIVED from the label, never parsed from the LLM.
+             * `evidence_status` must also match: "fetched" vs "unreachable"
+               are economically different worlds (one judged real content,
+               the other applied the refund-by-default policy).
+        4. Malformed leader output (label outside the fixed set) is an
+           automatic disagreement; a leader error is handled by
+           `_handle_leader_error`, which re-runs the task rather than giving
+           the leader the benefit of the doubt. Both force rotation.
         """
 
         def leader_fn():
-            return _run_arbitration_prompt(title, spec, delivered_work, dispute_reason)
+            return _run_arbitration_prompt(title, spec, delivered_work,
+                                           delivery_url, dispute_reason)
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
             # Broken/non-return leader results never get the benefit of the doubt.
             if not isinstance(leaders_res, gl.vm.Return):
                 return _handle_leader_error(leaders_res, leader_fn)
+            leader_decision = leaders_res.calldata["decision"]
+            leader_evidence = leaders_res.calldata["evidence_status"]
+            if leader_decision not in VALID_DECISIONS:
+                # Malformed settlement outcome: refuse outright - never
+                # negotiate with output that cannot move money safely.
+                return False
             try:
+                # Independent re-run: this validator's OWN web fetch and OWN
+                # LLM call; nothing from the leader is reused.
                 validator_res = leader_fn()
             except Exception:
                 # Validator's own independent run failed -> cannot compare ->
                 # disagree and rotate the leader.
                 return False
-            leader_decision = leaders_res.calldata["decision"]
-            validator_decision = validator_res["decision"]
-            if leader_decision != validator_decision:
+            # EXACT match required on every economic field. No tolerance.
+            if validator_res["decision"] != leader_decision:
                 return False
-            leader_pct = leaders_res.calldata["percent"]
-            validator_pct = validator_res["percent"]
-            diff = leader_pct - validator_pct
-            if diff < 0:
-                diff = -diff
-            return diff <= SPLIT_TOLERANCE_PERCENT
+            return validator_res["evidence_status"] == leader_evidence
 
         return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
@@ -549,7 +686,7 @@ class FreelanceEscrow(gl.Contract):
         client_atto = ag.escrow_atto - freelancer_atto
         ag.client_credit_atto = ag.client_credit_atto + client_atto
         ag.freelancer_credit_atto = ag.freelancer_credit_atto + freelancer_atto
-        if ag.judgment_decision == "release" or percent == 100:
+        if ag.judgment_decision == DECISION_RELEASE_FULL or percent == 100:
             ag.status = STATUS_RELEASED
         elif percent == 0:
             ag.status = STATUS_REFUNDED
@@ -616,6 +753,7 @@ class FreelanceEscrow(gl.Contract):
             "spec": ag.spec,
             "escrow_atto": ag.escrow_atto,
             "delivered_work": ag.delivered_work,
+            "delivery_url": ag.delivery_url,
             "status": ag.status,
             "dispute_reason": ag.dispute_reason,
             "judgment_decision": ag.judgment_decision,
