@@ -6,10 +6,12 @@ Freelance Escrow with AI Consensus Arbitration - GenLayer Intelligent Contract.
 A client deposits native-token funds into escrow for a freelancer to complete a
 defined task described by a written spec. On delivery, either party can raise a
 dispute. When disputed, GenLayer validators INDEPENDENTLY fetch the delivered
-artifact (when it was submitted as a URL) and evaluate it against the original
-spec using LLM-based comparative judgment, and the contract releases funds
-based on VALIDATOR CONSENSUS - not a single party's claim and not a single
-leader's LLM answer.
+artifact (submitted as a URL) and evaluate it against the original spec using
+LLM-based comparative judgment, and the contract releases funds based on
+VALIDATOR CONSENSUS - not a single party's claim and not a single leader's LLM
+answer. A delivery WITHOUT an externally fetchable URL FAILS CLOSED: no LLM is
+consulted and the escrow is refunded in full, so a self-described deliverable
+can never move money.
 
 Settlement outcomes form a small FIXED label set (RELEASE_FULL / REFUND_FULL /
 SPLIT_QUARTER / SPLIT_HALF / SPLIT_THREE_QUARTER). Because the chosen label
@@ -115,10 +117,12 @@ def _percent_for_decision(decision: str) -> int:
 # Evidence acquisition modes for arbitration (see _run_arbitration_prompt).
 # A delivery that includes a URL is only judged against content the evaluator
 # fetched WITH ITS OWN EYES; no fetched copy is ever handed between parties.
+# A delivery WITHOUT a URL gets no LLM judgment at all - FAIL CLOSED: the
+# contract refunds in full before any prompt or fetch is ever issued.
 # ---------------------------------------------------------------------------
-EVIDENCE_FETCHED = "fetched"                  # URL retrieved successfully
-EVIDENCE_UNREACHABLE = "unreachable"          # URL present but not retrievable
-EVIDENCE_DESCRIPTION_ONLY = "description_only"  # no URL: lower-assurance path
+EVIDENCE_FETCHED = "fetched"                    # URL retrieved successfully
+EVIDENCE_UNREACHABLE = "unreachable"            # URL present but not retrievable
+EVIDENCE_NO_URL_PROVIDED = "no_url_provided"    # fail closed: no verifiable evidence
 
 # Cap on fetched content fed into the prompt (bounded prompt = bounded
 # non-determinism and predictable validator cost).
@@ -314,36 +318,54 @@ def _run_arbitration_prompt(title: str, spec: str, delivered_work: str,
     fresh fetch of `delivery_url` - so they form an INDEPENDENT candidate
     judgment rather than trusting the leader's retrieved content or answer.
     """
-    if delivery_url != "":
-        fetched = _fetch_evidence(delivery_url)
-        if not fetched["ok"]:
-            # Deterministic fallback policy - NO LLM is consulted: work whose
-            # external artifact cannot be retrieved must not be paid out.
-            # Both evaluators reach this branch only from their OWN failed
-            # fetch, so exact agreement here (REFUND_FULL + "unreachable")
-            # is genuine consensus about the unverifiable, not a pass.
-            return {
-                "decision": DECISION_REFUND_FULL,
-                "percent": 0,
-                "evidence_status": EVIDENCE_UNREACHABLE,
-                "analysis": (
-                    "The delivery URL could not be retrieved by the evaluator; "
-                    "under the refund-by-default policy for unverifiable work "
-                    "the escrow is returned to the client."
-                ),
-            }
-        evidence_block = (
-            "EXTERNALLY FETCHED ARTIFACT - retrieved directly from "
-            f"{delivery_url} by THIS evaluator (not the submitter's words):\n"
-            f"{fetched['content']}\n\n"
-        )
-        evidence_status = EVIDENCE_FETCHED
-    else:
-        # Lower-assurance path: nothing external to verify, the LLM can only
-        # weigh the submitter's own description against the spec. Deliberately
-        # still allowed - see README "Evidence acquisition" for the reasoning.
-        evidence_block = ""
-        evidence_status = EVIDENCE_DESCRIPTION_ONLY
+    # FAIL CLOSED (reviewer-driven): a delivery without an externally
+    # fetchable URL offers NOTHING to independently verify - the LLM would
+    # be judging the freelancer's self-description alone, which is exactly
+    # the "unsubstantiated claim pays out" path that must not exist in an
+    # escrow. So before ANY prompt or fetch, an empty (or whitespace-only)
+    # URL refunds the escrow deterministically, with no LLM invocation.
+    # Both the leader and each validator reach this branch from the same
+    # on-chain input, so the REFUND_FULL is genuine consensus, never a pass.
+    if not delivery_url or str(delivery_url).strip() == "":
+        return {
+            "decision": DECISION_REFUND_FULL,
+            "percent": _percent_for_decision(DECISION_REFUND_FULL),
+            "evidence_status": EVIDENCE_NO_URL_PROVIDED,
+            "reasoning": (
+                "No delivery URL provided. Without independently verifiable "
+                "evidence, funds are refunded to the client per fail-closed "
+                "contract rules."
+            ),
+            "analysis": (
+                "No delivery URL provided. Without independently verifiable "
+                "evidence, funds are refunded to the client per fail-closed "
+                "contract rules."
+            ),
+        }
+
+    fetched = _fetch_evidence(delivery_url)
+    if not fetched["ok"]:
+        # Deterministic fallback policy - NO LLM is consulted: work whose
+        # external artifact cannot be retrieved must not be paid out.
+        # Both evaluators reach this branch only from their OWN failed
+        # fetch, so exact agreement here (REFUND_FULL + "unreachable")
+        # is genuine consensus about the unverifiable, not a pass.
+        return {
+            "decision": DECISION_REFUND_FULL,
+            "percent": 0,
+            "evidence_status": EVIDENCE_UNREACHABLE,
+            "analysis": (
+                "The delivery URL could not be retrieved by the evaluator; "
+                "under the refund-by-default policy for unverifiable work "
+                "the escrow is returned to the client."
+            ),
+        }
+    evidence_block = (
+        "EXTERNALLY FETCHED ARTIFACT - retrieved directly from "
+        f"{delivery_url} by THIS evaluator (not the submitter's words):\n"
+        f"{fetched['content']}\n\n"
+    )
+    evidence_status = EVIDENCE_FETCHED
 
     prompt = (
         "You are an impartial arbitration expert for a freelance escrow platform. "
@@ -624,9 +646,11 @@ class FreelanceEscrow(gl.Contract):
                token transfer, so "close enough" is not a valid basis for
                moving money. Percent cannot smuggle in wobble because it is
                DERIVED from the label, never parsed from the LLM.
-             * `evidence_status` must also match: "fetched" vs "unreachable"
-               are economically different worlds (one judged real content,
-               the other applied the refund-by-default policy).
+             * `evidence_status` must also match: "fetched", "unreachable"
+               and "no_url_provided" are economically different worlds (one
+               judged real fetched content, one applied the refund-by-default
+               policy for dead URLs, one applied the fail-closed refund for
+               deliveries with nothing to verify at all).
         4. Malformed leader output (label outside the fixed set) is an
            automatic disagreement; a leader error is handled by
            `_handle_leader_error`, which re-runs the task rather than giving

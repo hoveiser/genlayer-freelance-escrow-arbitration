@@ -67,6 +67,7 @@ def test_dispute_full_release(escrow, direct_vm):
     contract.raise_dispute("a1", "Client suspects the files are placeholders")
 
     mock_judgment(direct_vm, "RELEASE_FULL", "Work matches the spec on all points")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "hero features contact-form")
     direct_vm.sender = freelancer
     contract.resolve_dispute("a1")
     ag = contract.get_agreement("a1")
@@ -86,6 +87,7 @@ def test_dispute_full_refund(escrow, direct_vm):
     contract.raise_dispute("a1", "Delivered file does not exist")
 
     mock_judgment(direct_vm, "REFUND_FULL", "Deliverable does not satisfy the spec")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "broken placeholder page")
     direct_vm.sender = client
     contract.resolve_dispute("a1")
     ag = contract.get_agreement("a1")
@@ -105,6 +107,7 @@ def test_dispute_split_half(escrow, direct_vm):
     contract.raise_dispute("a1", "Client is refusing to approve completed work")
 
     mock_judgment(direct_vm, "SPLIT_HALF", "Partial spec compliance")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "two of three sections")
     direct_vm.sender = client
     contract.resolve_dispute("a1")
     ag = contract.get_agreement("a1")
@@ -128,6 +131,7 @@ def test_dispute_split_quarter_payout(escrow, direct_vm):
     direct_vm.sender = client
     contract.raise_dispute("a1", "Most of the spec unmet")
     mock_judgment(direct_vm, "SPLIT_QUARTER")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "one section only")
     direct_vm.sender = client
     contract.resolve_dispute("a1")
     contract.accept_resolution("a1")
@@ -141,6 +145,7 @@ def test_dispute_split_three_quarter_payout(escrow, direct_vm):
     direct_vm.sender = client
     contract.raise_dispute("a1", "Minor gaps only")
     mock_judgment(direct_vm, "SPLIT_THREE_QUARTER")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "nearly complete")
     direct_vm.sender = client
     contract.resolve_dispute("a1")
     contract.accept_resolution("a1")
@@ -159,6 +164,7 @@ def test_appeal_path_single_retrigger(escrow, direct_vm):
 
     # First arbitration: refund.
     mock_judgment(direct_vm, "REFUND_FULL")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "incomplete page")
     direct_vm.sender = freelancer
     contract.resolve_dispute("a1")
     ag = contract.get_agreement("a1")
@@ -168,6 +174,7 @@ def test_appeal_path_single_retrigger(escrow, direct_vm):
 
     # Appeal: freelancer re-triggers resolve_dispute; second judgment wins.
     mock_judgment(direct_vm, "SPLIT_HALF", "Contact form present but broken layout")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "form present, layout broken")
     contract.resolve_dispute("a1")
     ag = contract.get_agreement("a1")
     assert ag["appeal_count"] == 1
@@ -193,6 +200,7 @@ def test_cannot_appeal_after_settlement(escrow, direct_vm):
     direct_vm.sender = client
     contract.raise_dispute("a1", "not done")
     mock_judgment(direct_vm, "REFUND_FULL")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "nothing works")
     contract.resolve_dispute("a1")
     contract.accept_resolution("a1")
     with direct_vm.expect_revert("nothing to arbitrate"):
@@ -236,6 +244,7 @@ def test_only_parties_can_dispute_arbitrate_and_settle(delivered_agreement, dire
     with direct_vm.expect_revert("only a party"):
         contract.resolve_dispute("a1")
     mock_judgment(direct_vm, "SPLIT_HALF")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "half done")
     direct_vm.sender = freelancer
     contract.resolve_dispute("a1")
     direct_vm.sender = stranger
@@ -338,6 +347,7 @@ def test_judgment_key_aliasing_and_label_format_normalized(escrow, direct_vm):
         "freelancer_share": "99",
         "reasoning": "about half the spec fulfilled",
     })
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "about half there")
     direct_vm.sender = freelancer
     contract.resolve_dispute("a1")
     ag = contract.get_agreement("a1")
@@ -352,6 +362,7 @@ def test_label_outside_fixed_set_reverts(escrow, direct_vm):
     contract.raise_dispute("a1", "claim")
     for bad in ("SPLIT_60", "RELEASE_90_PERCENT", "partial", ""):
         mock_judgment_raw(direct_vm, {"decision": bad, "analysis": "x"})
+        mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "fetched content")
         with direct_vm.expect_revert("[LLM_ERROR]"):
             contract.resolve_dispute("a1")
     assert contract.get_agreement("a1")["status"] == "disputed"
@@ -368,6 +379,7 @@ def test_unparseable_llm_output_reverts(escrow, direct_vm):
     direct_vm.sender = client
     contract.raise_dispute("a1", "claim")
     mock_judgment_raw(direct_vm, "the work seems fine to me, trust me")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "fetched content")
     direct_vm.sender = client
     with direct_vm.expect_revert("[LLM_ERROR]"):
         contract.resolve_dispute("a1")
@@ -482,18 +494,65 @@ def test_server_error_url_also_not_payable(escrow, direct_vm):
     assert contract.get_agreement("a1")["judgment_decision"] == "REFUND_FULL"
 
 
-def test_description_only_path_is_recorded_as_lower_assurance(escrow, direct_vm):
-    """No URL in the delivery => the judgment is explicitly stamped
-    description_only (still allowed; see README for the policy reasoning)."""
-    contract, client, freelancer, _ = delivered_fixture(escrow, direct_vm)
+def test_no_url_delivery_fails_closed_to_refund_without_llm(escrow, direct_vm):
+    """FAIL CLOSED: a delivery with no URL can never pay out or split.
+
+    Reviewer-driven change: the old description-only path let the LLM
+    release or split funds based solely on the freelancer's own words.
+    Now an empty/missing URL refunds deterministically BEFORE any prompt
+    or fetch. Proof the LLM is never consulted: the mock below would
+    answer SPLIT_HALF, yet the stored outcome is REFUND_FULL.
+    """
+    contract, client, freelancer, _ = escrow
+    direct_vm.sender = client
+    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT)
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a1")
+    direct_vm.value = 0
+    direct_vm.sender = freelancer
+    contract.submit_delivery(
+        "a1", "Done! Files were handed over in person; no link."
+    )
     assert contract.get_agreement("a1")["delivery_url"] == ""
     direct_vm.sender = client
+    contract.raise_dispute("a1", "nothing was delivered")
+
+    mock_judgment(direct_vm, "SPLIT_HALF")  # must NEVER be consulted
+
+    direct_vm.sender = freelancer
+    contract.resolve_dispute("a1")
+    ag = contract.get_agreement("a1")
+    assert ag["judgment_decision"] == "REFUND_FULL"
+    assert ag["judgment_percent"] == 0
+    record = json.loads(ag["arbitration_history"][0])
+    assert record["evidence_status"] == "no_url_provided"
+    assert record["decision"] == "REFUND_FULL"
+    assert "fail-closed" in ag["judgment_analysis"]
+
+    contract.accept_resolution("a1")
+    assert contract.get_withdrawable(client) == AMOUNT
+    assert contract.get_withdrawable(freelancer) == 0
+
+
+def test_whitespace_only_url_path_also_fails_closed(escrow, direct_vm):
+    """A whitespace-only URL argument is treated as no URL at all."""
+    contract, client, freelancer, _ = escrow
+    direct_vm.sender = client
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a1")
+    direct_vm.value = 0
+    direct_vm.sender = freelancer
+    contract.submit_delivery("a1", "delivered by carrier pigeon")
+    direct_vm.sender = client
     contract.raise_dispute("a1", "claim")
-    mock_judgment(direct_vm, "SPLIT_HALF")
+    mock_judgment(direct_vm, "RELEASE_FULL")  # must NEVER be consulted
     direct_vm.sender = client
     contract.resolve_dispute("a1")
-    record = json.loads(contract.get_agreement("a1")["arbitration_history"][0])
-    assert record["evidence_status"] == "description_only"
+    ag = contract.get_agreement("a1")
+    assert ag["judgment_decision"] == "REFUND_FULL"
+    record = json.loads(ag["arbitration_history"][0])
+    assert record["evidence_status"] == "no_url_provided"
 
 
 # ---------------------------------------------------------------------------
@@ -503,8 +562,10 @@ def test_description_only_path_is_recorded_as_lower_assurance(escrow, direct_vm)
 def delivered_fixture(escrow, direct_vm):
     """Run the delivered-agreement flow inline (returns 4-tuple).
 
-    Deliberately description-only (no URL): leader-side arbitration then
-    needs no web mock unless the individual test adds one.
+    Delivery carries a fetchable URL - the ONLY form the fail-closed
+    contract allows to reach LLM arbitration. Tests that run arbitration
+    must additionally mock the fetch (200) via mock_delivery_fetch, since
+    mock_judgment clears all mocks first.
     """
     contract, client, freelancer, stranger = escrow
     direct_vm.sender = client
@@ -518,7 +579,7 @@ def delivered_fixture(escrow, direct_vm):
     direct_vm.sender = freelancer
     contract.submit_delivery(
         "a1",
-        "Built all three sections and the contact form; source archived and "
-        "shared with the client out-of-band.",
+        "https://delivered.example/a1 - all three sections and the contact "
+        "form are live on this page.",
     )
     return contract, client, freelancer, stranger

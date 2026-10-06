@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """End-to-end demo of FreelanceEscrow against a PERSISTENT studionet deployment.
 
-This script drives a real deploy (or binds to an existing address) and runs a
-full escrow lifecycle on studio.genlayer.com through the genlayer-py SDK:
+This script drives a real deploy (or binds to an existing address) and runs TWO
+full escrow lifecycles on studio.genlayer.com through the genlayer-py SDK:
 
-    create_agreement -> fund_escrow (native value) -> submit_delivery
-    -> raise_dispute -> resolve_dispute (independent URL fetch + LLM
-       consensus on one EXACT fixed settlement label) -> accept_resolution
+    LIFECYCLE 1 (URL delivery): create_agreement -> fund_escrow (native value)
+       -> submit_delivery -> raise_dispute -> resolve_dispute (independent URL
+       fetch + LLM consensus on one EXACT fixed settlement label) ->
+       accept_resolution
+    LIFECYCLE 2 (FAIL CLOSED): same flow but the delivery carries NO URL -
+       arbitration must deterministically refund the client in full with
+       evidence_status=no_url_provided and NEVER consult the LLM.
 
 It uses TWO accounts so the sender checks are genuinely exercised:
   * CLIENT     - private key read from the GENLAYER_PRIVATE_KEY env var
@@ -142,6 +146,43 @@ def main():
     hashes["accept_resolution"] = _send(
         client, client_account, address, "accept_resolution", args=[aid])
 
+    # --- LIFECYCLE 2: fail-closed proof (delivery WITHOUT any URL) ---
+    aid2 = f"job-{int(time.time()) % 100000}-nourl"
+    hashes["create_agreement_nourl"] = _send(
+        client, client_account, address, "create_agreement",
+        args=[aid2, freelancer_account.address, "Logo design",
+              "A vector logo delivered as a public URL", AMOUNT_ATTO])
+    hashes["fund_escrow_nourl"] = _send(
+        client, client_account, address, "fund_escrow", args=[aid2],
+        value=AMOUNT_ATTO)
+    hashes["submit_delivery_nourl"] = _send(
+        client, freelancer_account, address, "submit_delivery",
+        args=[aid2, "The logo is finished and looks great; files sent by "
+                    "email. (no URL - claim only)"])
+    hashes["raise_dispute_nourl"] = _send(
+        client, client_account, address, "raise_dispute",
+        args=[aid2, "Client denies receiving any file"])
+    hashes["resolve_dispute_nourl"] = _send(  # <-- deterministic fail-closed branch
+        client, client_account, address, "resolve_dispute", args=[aid2])
+    hashes["accept_resolution_nourl"] = _send(
+        client, client_account, address, "accept_resolution", args=[aid2])
+
+    ag2 = client.read_contract(address=address, function_name="get_agreement",
+                               args=[aid2])
+    print("\nfail-closed (no-URL) agreement state:")
+    print(json.dumps({k: ag2[k] for k in
+                      ("status", "judgment_decision", "judgment_percent",
+                       "delivery_url")}, indent=2))
+    record2 = json.loads(ag2["arbitration_history"][-1])
+    print(f"arbitration record: decision={record2['decision']} "
+          f"evidence_status={record2['evidence_status']}")
+    assert ag2["delivery_url"] == "", "no-URL delivery must store an empty URL"
+    assert record2["decision"] == "REFUND_FULL", \
+        "fail-closed: a delivery without URL must refund in full"
+    assert record2["evidence_status"] == "no_url_provided"
+    assert ag2["judgment_percent"] == 0
+    assert ag2["status"] == "refunded"
+
     ag = client.read_contract(address=address, function_name="get_agreement", args=[aid])
     pool = client.read_contract(address=address, function_name="get_escrow_pool")
     cred_f = client.read_contract(address=address, function_name="get_withdrawable",
@@ -160,7 +201,8 @@ def main():
     assert ag["judgment_percent"] == VALID_JUDGMENTS[record["decision"]], \
         "stored percent must EXACTLY equal the label-derived payout"
     print(f"escrow_pool={pool}  freelancer_credit={cred_f}  client_credit={cred_c}")
-    assert cred_f + cred_c == AMOUNT_ATTO, "payout must equal the escrow exactly"
+    assert cred_f + cred_c == 2 * AMOUNT_ATTO, \
+        "payout must equal the two funded escrows exactly"
     print("\nOK: full lifecycle executed on studionet with real consensus.")
     print("TX_HASHES=" + json.dumps(hashes))
 

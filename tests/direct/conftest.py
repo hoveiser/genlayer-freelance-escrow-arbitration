@@ -40,7 +40,9 @@ def mock_delivery_fetch(direct_vm, url_pattern: str, body: str, status: int = 20
     """Mock the evaluator's OWN web fetch of a delivered artifact URL.
 
     Call AFTER mock_judgment / mock_judgment_raw: those start with
-    clear_mocks() and would otherwise wipe this mock.
+    clear_mocks() and would otherwise wipe this mock. A 200 response is
+    required for arbitration tests - without one the contract's
+    refund-by-default path (unreachable) fires before the LLM.
     """
     direct_vm.mock_web(url_pattern, {"status": status, "body": body})
 
@@ -71,14 +73,14 @@ def funded_agreement(escrow, direct_vm):
 
 @pytest.fixture
 def delivered_agreement(funded_agreement, direct_vm):
-    """Contract with agreement 'a1' delivered by the freelancer (no URL —
-    the description-only evidence path, so leader-side arbitration needs no
-    web mock unless the test adds one)."""
+    """Contract with agreement 'a1' delivered WITH a fetchable URL - the only
+    delivery form the fail-closed contract allows to reach LLM arbitration
+    (tests running arbitration must still mock the fetch itself)."""
     contract, client, freelancer = funded_agreement
     direct_vm.sender = freelancer
     contract.submit_delivery(
         "a1",
-        "Built all three sections and the contact form; source archived and "
-        "shared with the client out-of-band.",
+        "https://delivered.example/a1 - all three sections and the contact "
+        "form are live on this page.",
     )
     return contract, client, freelancer

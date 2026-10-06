@@ -50,7 +50,7 @@ VALID_JUDGMENTS = {
     "SPLIT_HALF": 50,
     "SPLIT_THREE_QUARTER": 75,
 }
-VALID_EVIDENCE = ("fetched", "unreachable", "description_only")
+VALID_EVIDENCE = ("fetched", "unreachable", "no_url_provided")
 
 
 def _assert_consensus_judgment(ag):
@@ -168,3 +168,55 @@ def test_appeal_re_runs_consensus_and_limit_is_enforced():
     # one independently fetched + re-judged with zero tolerance.
     _assert_consensus_judgment(first)
     _assert_consensus_judgment(second)
+
+
+def test_no_url_delivery_fails_closed_via_consensus():
+    """FAIL CLOSED through real consensus: no URL => deterministic refund.
+
+    A description-only delivery must settle REFUND_FULL with evidence
+    status `no_url_provided` - the arbitration prompt (and any URL fetch)
+    is never reached, so validators consensus on a purely deterministic
+    branch instead of letting an LLM judge the freelancer's own words.
+    """
+    client, freelancer = _parties()
+    factory = get_contract_factory(CONTRACT)
+    contract = factory.deploy(args=[], account=client)
+    freelancer_contract = factory.build_contract(contract.address, account=freelancer)
+
+    aid = "integration-nourl"
+    assert tx_execution_succeeded(
+        contract.create_agreement(
+            args=[aid, freelancer.address, "Logo design",
+                  "A vector logo delivered as a public URL", AMOUNT_ATTO]
+        ).transact()
+    )
+    assert tx_execution_succeeded(
+        contract.fund_escrow(args=[aid]).transact(value=AMOUNT_ATTO)
+    )
+    assert tx_execution_succeeded(
+        freelancer_contract.submit_delivery(
+            args=[aid, "The logo is finished and looks great; files sent "
+                       "by email."]
+        ).transact()
+    )
+    assert contract.get_agreement(args=[aid]).call()["delivery_url"] == ""
+    assert tx_execution_succeeded(
+        contract.raise_dispute(args=[aid, "Client denies receiving any file"]).transact()
+    )
+
+    assert tx_execution_succeeded(
+        contract.resolve_dispute(args=[aid]).transact()
+    )
+    ag = contract.get_agreement(args=[aid]).call()
+    assert ag["judgment_decision"] == "REFUND_FULL"
+    assert ag["judgment_percent"] == 0
+    record = json.loads(ag["arbitration_history"][-1])
+    assert record["evidence_status"] == "no_url_provided"
+
+    assert tx_execution_succeeded(
+        contract.accept_resolution(args=[aid]).transact()
+    )
+    ag = contract.get_agreement(args=[aid]).call()
+    assert ag["status"] == "refunded"
+    assert contract.get_withdrawable(args=[client.address]).call() == AMOUNT_ATTO
+    assert contract.get_withdrawable(args=[freelancer.address]).call() == 0
