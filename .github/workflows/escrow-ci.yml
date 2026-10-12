@@ -1,0 +1,39 @@
+# CI for the GenLayer freelance escrow contract.
+# Runs the deterministic parts of the test suite on every push:
+#   1. genvm-lint validation of the contract
+#   2. the direct-mode pytest suite (in-process VM, no network, no keys)
+# The integration suite talks to public studionet, signs real transactions
+# and the reclaim scenario waits out a real 1-hour deadline, so it is run
+# manually (see README) instead of in CI.
+name: escrow-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  direct-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint contract with genvm-lint
+        run: genvm-lint check contracts/freelance_escrow.py
+
+      # Seeds the gltest direct-runner cache from the genvm bundle that the
+      # lint step just downloaded (works around the runner's 404 on "latest"
+      # release assets; see comments inside the script).
+      - name: Prepare direct-test cache
+        run: bash scripts/setup_direct_test_cache.sh
+
+      - name: Run direct-mode test suite
+        run: pytest tests/direct/ -q

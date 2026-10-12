@@ -307,6 +307,8 @@ scripts/studionet_e2e_demo.py      # drives the live URL + no-URL lifecycles
 scripts/studionet_reclaim_demo.py  # drives the live deadline/reclaim lifecycle
 scripts/deploy_studionet.py        # persistent studionet deployment
 scripts/verify_deployed_source.py  # repo-vs-deployed source comparison
+scripts/probe_source_retrieval.py  # diagnostic for the source-retrieval RPC
+.github/workflows/escrow-ci.yml    # CI: genvm-lint + direct tests on every push
 ```
 
 ## Setup
@@ -444,19 +446,54 @@ variable (`.env`, git-ignored - see [.gitignore](.gitignore)); it was never
 hardcoded, logged, or committed. Value-bearing calls sent real GEN transfers
 (`fund_escrow` = 3-5 GEN at atto scale).
 
-**Deployments (each revision is a NEW address; the storage layout changed):**
+**Deployments (every contract revision changes the storage layout, so each is
+a NEW address):**
 
 | Revision | Address | Deploy tx | Consensus |
 |---|---|---|---|
-| Current (deadline + exits) | `0x06004A0D77F91d1d4691403595c185173Dd4a6F4` | [`0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076`](https://explorer-studio.genlayer.com/tx/0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076) | `MAJORITY_AGREE` |
+| Current, deployed from the frozen commit (deadline + exits) | `0x148c670A41cFEF2BA6218219d1Fe7addfEE92A1F` | [`0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf`](https://explorer-studio.genlayer.com/tx/0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf) | `MAJORITY_AGREE` |
+| Validation copy of the identical source (pre-freeze deploy used to prove scripts and flows) | `0x06004A0D77F91d1d4691403595c185173Dd4a6F4` | [`0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076`](https://explorer-studio.genlayer.com/tx/0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076) | `MAJORITY_AGREE` |
 | Previous (fail-closed arbitration) | `0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD` | [`0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e`](https://explorer-studio.genlayer.com/tx/0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e) | `MAJORITY_AGREE` |
 
-**Evidence runs on the current deployment** (driven by
-[scripts/studionet_reclaim_demo.py](scripts/studionet_reclaim_demo.py), all
-through full consensus; tx hashes recorded here are re-verified against the
-explorer JSON API):
+The validation copy is byte-identical to the frozen commit (`sha256
+2566d5d39f9b2366b71efe953db410edea50f08e11d6c727eb03dd94154bfdb1`, verified
+with `scripts/verify_deployed_source.py` against both deploy txs), so the
+evidence recorded below for it applies to exactly the code that runs on the
+primary address.
 
-<!-- EVIDENCE_TABLE_PLACEHOLDER -->
+**Reclaim lifecycle evidence on the primary deployment** (driven by
+[scripts/studionet_reclaim_demo.py](scripts/studionet_reclaim_demo.py), all
+through full consensus; every tx re-verified via the explorer JSON API, not
+just CLI output):
+
+| Step | Explorer tx | Verified on-chain outcome (explorer JSON API) |
+|---|---|---|
+| create_agreement (window = 3600s, the production floor) | [`0x932624b9...`](https://explorer-studio.genlayer.com/tx/0x932624b947363a401c1fad87e37d5bd4cdb44d43334c992c20e60b4c0b52b4de) | `FINALIZED` / `MAJORITY_AGREE` / executed |
+| fund_escrow (3 GEN at atto; sets `delivery_deadline_ts`) | [`0x1de732ea...`](https://explorer-studio.genlayer.com/tx/0x1de732eabcddd43a2e94aa8e0a87ab6be541da0d42638ad1ee7d557043f9632f) | `FINALIZED` / executed; `value = 3000000000000000000` |
+| reclaim_undelivered BEFORE the deadline | [`0xec662a07...`](https://explorer-studio.genlayer.com/tx/0xec662a074c480a3606143328048f947bec1817a0b46d52543fd91192f829405e) | `FINALIZED` / reverted (early recovery refused) |
+| submit_delivery AFTER the deadline (freelancer signer) | [`0x59d98f4b...`](https://explorer-studio.genlayer.com/tx/0x59d98f4bd6f8aac8cf151c2f66023989a7673579fe3e1b2f378e4961664c1bba) | `FINALIZED` / reverted (late delivery refused) |
+| reclaim_undelivered after a real 1h wall-clock wait | [`0x12d178c9...`](https://explorer-studio.genlayer.com/tx/0x12d178c951d4a578f513743f8086482ec4cb03ef0d8f13386c310642e7d62552) | `FINALIZED` / executed; agreement flipped to `refunded`, `judgment_decision = REFUND_FULL`, client credited 3 GEN, freelancer 0, `invariant_holds = true` |
+| second reclaim_undelivered on the same agreement | [`0x789de9ba...`](https://explorer-studio.genlayer.com/tx/0x789de9ba43522e2656c098c9903b58c433d2951849c311c4ff3e8e5aedcd1ca3) | `FINALIZED` / reverted (double settlement impossible via `_credit_out` guard) |
+| withdraw (client takes the refund) | [`0xe97056ca...`](https://explorer-studio.genlayer.com/tx/0xe97056cae42f2b5fc1a0ee37141bb0c7cc64bfe8e91f68b5045c7d841b3a4850) | `FINALIZED` / executed; `escrow_pool_atto` went from `3000000000000000000` to `0` |
+
+Each row was confirmed via POST `{jsonrpc, method:"eth_getTransactionByHash", params:[tx]}` to `https://explorer-studio.genlayer.com/api`, reading `status`, `result_name`, `value`, and the `eq_blocks_outputs` msgpack envelope (which encodes `c2 01 00` for a reverted call and `c2 80 00` for an executed one). The full lifecycle on the primary address finished with `get_accounting() = {pool: 0, unwithdrawn: 0, locked: 0, invariant_holds: true}`.
+
+**Corroborating validation run on the byte-identical copy** (same script):
+
+| Step | Explorer tx | On-chain outcome |
+|---|---|---|
+| create_agreement (1h window floor) | [`0x3b22bf7d...`](https://explorer-studio.genlayer.com/tx/0x3b22bf7d6481cd78778d744f2fa806756bb302b4047dd4901262831349958831) | FINALIZED / executed |
+| fund_escrow (3 GEN, starts deadline) | [`0xf75a14cd...`](https://explorer-studio.genlayer.com/tx/0xf75a14cd3eaa914a2311fa23005b08bf58fbf7cee6517b72bd012b8c72f59ac8) | FINALIZED / executed, value 3e18 |
+| reclaim_undelivered BEFORE deadline | [`0x027c0494...`](https://explorer-studio.genlayer.com/tx/0x027c0494d7d41b1fcfeca9e6688be2f740eb75c82bc700d36fca2fd27f41be69) | FINALIZED / reverted (early recovery refused) |
+| submit_delivery AFTER deadline | [`0x07500d21...`](https://explorer-studio.genlayer.com/tx/0x07500d212f9ccf246ee2dfe2d78e821401f13df3a1fbed310bc7f9c7f456814b) | FINALIZED / reverted (late delivery refused) |
+| reclaim_undelivered after real 1h wait | [`0x35c590ac...`](https://explorer-studio.genlayer.com/tx/0x35c590ac327e04df02041674ce2621f05c2e2fd39ad15e49059c8e3dd580c69f) | FINALIZED / executed; status refunded, client credit 3 GEN, freelancer 0, `invariant_holds: true` |
+| second reclaim_undelivered | [`0xaba7731c...`](https://explorer-studio.genlayer.com/tx/0xaba7731c201450254cdb13a5aeb674661c0f58b79236e123df499df7ff83b376) | FINALIZED / reverted (double release impossible) |
+| withdraw (client takes the refund) | [`0x6d8d1a62...`](https://explorer-studio.genlayer.com/tx/0x6d8d1a623b81ea2926a3edade1b7af84bdbca446ce122c8b208aaffc77164b02) | FINALIZED / executed; pool returned to 0 |
+
+The same flow on the byte-identical source also passed as a real gltest
+integration run against full validator consensus:
+`test_reclaim_undelivered_live_via_consensus` (1 passed in 1:01:07, production
+1h floor, not weakened for tests).
 
 Earlier-lifecycle evidence on the previous deployment (URL arbitration and
 no-URL fail-closed, unchanged in this revision) remains on-chain:
@@ -485,7 +522,30 @@ arbitration txs
 - The commit hash and source sha256 of the deployed revision are recorded in
   the deploy section below and in the git tag for this release.
 
-<!-- PROVENANCE_PLACEHOLDER -->
+### Frozen provenance of the deployed source
+
+| Field | Value |
+|---|---|
+| Deployed contract address (primary) | `0x148c670A41cFEF2BA6218219d1Fe7addfEE92A1F` |
+| Deploy tx | [`0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf`](https://explorer-studio.genlayer.com/tx/0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf) (FINALIZED / MAJORITY_AGREE) |
+| Commit that produced the deployed source | `1b363be38f682828b84830a5c16138b618e39470` |
+| Git tag on that commit | `escrow-delivery-deadline-1` |
+| sha256 of `contracts/freelance_escrow.py` at that commit | `2566d5d39f9b2366b71efe953db410edea50f08e11d6c727eb03dd94154bfdb1` |
+| sha256 of the source decoded from the deploy tx `data.contract_code` | `2566d5d39f9b2366b71efe953db410edea50f08e11d6c727eb03dd94154bfdb1` (identical) |
+| Verification command anyone can re-run | `python scripts/verify_deployed_source.py 0x148c670A41cFEF2BA6218219d1Fe7addfEE92A1F 0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf` (read-only, no keys) |
+| Output of that command on the current repo state | `[1] byte-level source match: True / [2] schema match: True / VERIFIED` |
+
+Subsequent documentation-only commits (e.g. the one that adds this provenance
+text) do not touch `contracts/freelance_escrow.py`, so the deployed source
+remains byte-identical to the file at `1b363be`.
+
+**Honest caveat:** GenLayer's `eth_getCode(address)` returns `0x` because
+intelligent contracts are stored as Python source embedded in the deploy
+transaction's `data.contract_code` field, not as EVM bytecode. That is
+exactly what makes the byte-level comparison above possible via the public
+explorer API alone (no trusted side channel needed): anyone can re-fetch
+`eth_getTransactionByHash(deploy_tx)`, base64-decode the source, hash it, and
+confirm it equals the hash of the file at the tagged commit.
 
 ## Deploy (from scratch)
 
@@ -545,6 +605,10 @@ contracts/freelance_escrow.py` after `genlayer network set studionet`.
 - `genvm-lint check` passes; **48 direct-mode tests** pass (deadline suite
   included); the integration suite contains a matching no-URL fail-closed test
   and a **live full-consensus reclaim test** at the production window floor.
+- **CI** (`.github/workflows/escrow-ci.yml`) runs `genvm-lint check` plus the
+  full direct-mode suite on every push and pull request; the live studionet
+  suite is run manually because it signs real transactions and waits out a
+  real 1-hour deadline.
 - **Persistent studionet deployment** of this revision with early-reclaim
   revert, late-delivery revert, successful reclaim, and withdraw - all txs
   re-verified through the explorer JSON API.
