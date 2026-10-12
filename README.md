@@ -528,16 +528,27 @@ arbitration txs
 |---|---|
 | Deployed contract address (primary) | `0x148c670A41cFEF2BA6218219d1Fe7addfEE92A1F` |
 | Deploy tx | [`0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf`](https://explorer-studio.genlayer.com/tx/0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf) (FINALIZED / MAJORITY_AGREE) |
-| Commit that produced the deployed source | `1b363be38f682828b84830a5c16138b618e39470` |
-| Git tag on that commit | `escrow-delivery-deadline-1` |
-| sha256 of `contracts/freelance_escrow.py` at that commit | `2566d5d39f9b2366b71efe953db410edea50f08e11d6c727eb03dd94154bfdb1` |
+| Commit that produced the deployed source (feature commit) | `1b363be38f682828b84830a5c16138b618e39470` |
+| Commit tagged as the reproducible deployed source (LF-normalized blob bytes match the deploy tx exactly) | `b5ab2d8` (see `git rev-parse escrow-delivery-deadline-1^{commit}` for the full hash) |
+| Git tag | `escrow-delivery-deadline-1` (annotated, on the LF-normalized commit) |
+| sha256 of `contracts/freelance_escrow.py` at the tagged commit (raw bytes) | `2566d5d39f9b2366b71efe953db410edea50f08e11d6c727eb03dd94154bfdb1` |
 | sha256 of the source decoded from the deploy tx `data.contract_code` | `2566d5d39f9b2366b71efe953db410edea50f08e11d6c727eb03dd94154bfdb1` (identical) |
 | Verification command anyone can re-run | `python scripts/verify_deployed_source.py 0x148c670A41cFEF2BA6218219d1Fe7addfEE92A1F 0x7831833a1fff6d7bec2348b36b7074fe62c2d79effa3a4d192f956a59de54cdf` (read-only, no keys) |
 | Output of that command on the current repo state | `[1] byte-level source match: True / [2] schema match: True / VERIFIED` |
 
 Subsequent documentation-only commits (e.g. the one that adds this provenance
 text) do not touch `contracts/freelance_escrow.py`, so the deployed source
-remains byte-identical to the file at `1b363be`.
+remains byte-identical to the file at the tagged commit.
+
+Note on line endings: the Windows working tree at the feature commit `1b363be`
+had CRLF while the deployed source is always LF (the GenLayer SDK reads the
+file in text mode before hashing and uploading, so CR is stripped at deploy
+time). To make `sha256sum contracts/freelance_escrow.py` return the same hash
+as the on-chain bytes for anyone checking out the repo, a follow-up
+line-ending-normalization commit `b5ab2d8` (adds `.gitattributes` and
+renormalizes tracked text files to LF) is what the annotated tag now points
+at. `git diff --ignore-cr-at-eol 1b363be..b5ab2d8 -- contracts/` shows zero
+semantic change.
 
 **Honest caveat:** GenLayer's `eth_getCode(address)` returns `0x` because
 intelligent contracts are stored as Python source embedded in the deploy
