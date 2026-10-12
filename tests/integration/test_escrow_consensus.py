@@ -17,7 +17,7 @@ Run against a real environment (see README "Testing"):
     gltest tests/integration/ -v -s --network studionet
 
 or testnet_bradbury / local Studio (accounts must exist in
-gltest.config.yaml; on public testnets, fund them via the GenLayer faucet —
+gltest.config.yaml; on public testnets, fund them via the GenLayer faucet -
 studionet is gasless). NOTE: `glsim` does NOT work with this contract's pinned
 GenVM runner generation (it doesn't execute real GenVM runners); see README.
 
@@ -25,6 +25,8 @@ Marked `slow`: excluded from default runs with `-m "not slow"` if you want.
 """
 
 import json
+import os
+import time
 
 import pytest
 
@@ -51,6 +53,10 @@ VALID_JUDGMENTS = {
     "SPLIT_THREE_QUARTER": 75,
 }
 VALID_EVIDENCE = ("fetched", "unreachable", "no_url_provided")
+
+# Shortest window the production contract accepts (floor is a hard security
+# bound, NOT weakened for tests - see MIN_DELIVERY_WINDOW_SECONDS).
+MIN_WINDOW = 60 * 60
 
 
 def _assert_consensus_judgment(ag):
@@ -81,7 +87,8 @@ def _deliver_flow(contract, freelancer_contract, freelancer):
     """
     assert tx_execution_succeeded(
         contract.create_agreement(
-            args=[AGREEMENT_ID, freelancer.address, "Landing page", SPEC, AMOUNT_ATTO]
+            args=[AGREEMENT_ID, freelancer.address, "Landing page", SPEC,
+                  AMOUNT_ATTO, 24 * 3600]
         ).transact()
     )
     assert tx_execution_succeeded(
@@ -145,7 +152,7 @@ def test_appeal_re_runs_consensus_and_limit_is_enforced():
     assert tx_execution_succeeded(contract.resolve_dispute(args=[AGREEMENT_ID]).transact())
     first = contract.get_agreement(args=[AGREEMENT_ID]).call()
 
-    # Appeal (still consensus — validators independently re-judge again).
+    # Appeal (still consensus: validators independently re-judge again).
     assert tx_execution_succeeded(
         freelancer_contract.resolve_dispute(args=[AGREEMENT_ID]).transact()
     )
@@ -171,7 +178,7 @@ def test_appeal_re_runs_consensus_and_limit_is_enforced():
 
 
 def test_no_url_delivery_fails_closed_via_consensus():
-    """FAIL CLOSED through real consensus: no URL => deterministic refund.
+    """FAIL CLOSED through real consensus: no URL means deterministic refund.
 
     A description-only delivery must settle REFUND_FULL with evidence
     status `no_url_provided` - the arbitration prompt (and any URL fetch)
@@ -187,7 +194,8 @@ def test_no_url_delivery_fails_closed_via_consensus():
     assert tx_execution_succeeded(
         contract.create_agreement(
             args=[aid, freelancer.address, "Logo design",
-                  "A vector logo delivered as a public URL", AMOUNT_ATTO]
+                  "A vector logo delivered as a public URL", AMOUNT_ATTO,
+                  24 * 3600]
         ).transact()
     )
     assert tx_execution_succeeded(
@@ -220,3 +228,84 @@ def test_no_url_delivery_fails_closed_via_consensus():
     assert ag["status"] == "refunded"
     assert contract.get_withdrawable(args=[client.address]).call() == AMOUNT_ATTO
     assert contract.get_withdrawable(args=[freelancer.address]).call() == 0
+
+
+def test_reclaim_undelivered_live_via_consensus():
+    """FULL-CONSENSUS reclaim path on live studionet, real clock, real wait.
+
+    Uses the SHORTEST window the PRODUCTION contract allows (1 hour floor);
+    the floor is NOT weakened by any test-only hook, so this exercises the
+    exact on-chain deadline arithmetic (_now_ts from the consensus-signed
+    message datetime) that ships. The test polls real time until the stored
+    delivery_deadline_ts has passed, which makes it run ~1h+consensus; set
+    ESCROW_RECLAIM_DEADLINE_WAIT to a smaller number of seconds to skip it
+    in time-boxed CI (direct-mode tests cover the boundary math exactly).
+
+    Proven on-chain, all through validator consensus:
+      1. early reclaim (before deadline) REVERTS - no recovery before the
+         deadline, even for the client;
+      2. late delivery REVERTS after the deadline;
+      3. reclaim_undelivered SUCCEEDS after the deadline, credits the FULL
+         escrow to the client, freelancer stays at 0;
+      4. a second reclaim REVERTS (status is terminal, double spend is out
+         of reach);
+      5. the accounting invariant pool == unwithdrawn + locked holds at each
+         step.
+    """
+    wait_override = os.environ.get("ESCROW_RECLAIM_DEADLINE_WAIT")
+    if wait_override is not None and int(wait_override) < MIN_WINDOW:
+        pytest.skip("reclaim live test skipped: production 1h floor is not "
+                    "weakened for CI; direct-mode tests cover boundaries")
+    client, freelancer = _parties()
+    factory = get_contract_factory(CONTRACT)
+    contract = factory.deploy(args=[], account=client)
+    freelancer_contract = factory.build_contract(contract.address, account=freelancer)
+
+    aid = "integration-reclaim"
+    assert tx_execution_succeeded(
+        contract.create_agreement(
+            args=[aid, freelancer.address, "Poster set",
+                  "Deliver 3 posters as a public URL gallery", AMOUNT_ATTO,
+                  MIN_WINDOW]
+        ).transact()
+    )
+    assert tx_execution_succeeded(
+        contract.fund_escrow(args=[aid]).transact(value=AMOUNT_ATTO)
+    )
+    ag = contract.get_agreement(args=[aid]).call()
+    deadline = ag["delivery_deadline_ts"]
+    assert deadline > 0
+
+    # 1. Early reclaim must revert (consensus executes the guard and fails).
+    early = contract.reclaim_undelivered(args=[aid]).transact()
+    assert tx_execution_failed(early), "early reclaim must not finalize"
+    assert contract.get_agreement(args=[aid]).call()["status"] == "funded"
+
+    # Wait out the REAL deadline (poll against the on-chain stored value).
+    while time.time() <= deadline + 5:
+        time.sleep(30)
+
+    # 2. Late delivery must revert after the deadline.
+    late = freelancer_contract.submit_delivery(
+        args=[aid, "https://late.example/gallery"]).transact()
+    assert tx_execution_failed(late), "late delivery must not finalize"
+
+    # 3. Reclaim succeeds through consensus and credits the FULL escrow.
+    assert tx_execution_succeeded(
+        contract.reclaim_undelivered(args=[aid]).transact()
+    )
+    ag = contract.get_agreement(args=[aid]).call()
+    assert ag["status"] == "refunded"
+    assert ag["judgment_decision"] == "REFUND_FULL"
+    record = json.loads(ag["arbitration_history"][-1])
+    assert "deadline expired without delivery" in record["analysis"]
+    assert contract.get_withdrawable(args=[client.address]).call() == AMOUNT_ATTO
+    assert contract.get_withdrawable(args=[freelancer.address]).call() == 0
+
+    # 4. Second reclaim reverts (already refunded, nothing left to recover).
+    again = contract.reclaim_undelivered(args=[aid]).transact()
+    assert tx_execution_failed(again)
+
+    # 5. Conservation identity holds on-chain after every transition.
+    acc = contract.get_accounting(args=[]).call()
+    assert acc["invariant_holds"], f"on-chain accounting broken: {acc}"

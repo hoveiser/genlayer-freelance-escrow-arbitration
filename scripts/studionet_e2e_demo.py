@@ -41,6 +41,7 @@ from genlayer_py.chains import studionet
 ENDPOINT = "https://studio.genlayer.com/api"
 EXPLORER = "https://explorer-studio.genlayer.com"
 AMOUNT_ATTO = 5 * 10**18  # 5 GEN at atto scale
+WINDOW = 24 * 3600        # 1 day delivery window for the demo agreements
 
 # The only settlement outcomes the contract can produce (exact, label-derived).
 VALID_JUDGMENTS = {
@@ -134,7 +135,8 @@ def main():
 
     hashes["create_agreement"] = _send(
         client, client_account, address, "create_agreement",
-        args=[aid, freelancer_account.address, "Landing page", SPEC, AMOUNT_ATTO])
+        args=[aid, freelancer_account.address, "Landing page", SPEC,
+              AMOUNT_ATTO, WINDOW])
     hashes["fund_escrow"] = _send(
         client, client_account, address, "fund_escrow", args=[aid], value=AMOUNT_ATTO)
     hashes["submit_delivery"] = _send(
@@ -151,7 +153,7 @@ def main():
     hashes["create_agreement_nourl"] = _send(
         client, client_account, address, "create_agreement",
         args=[aid2, freelancer_account.address, "Logo design",
-              "A vector logo delivered as a public URL", AMOUNT_ATTO])
+              "A vector logo delivered as a public URL", AMOUNT_ATTO, WINDOW])
     hashes["fund_escrow_nourl"] = _send(
         client, client_account, address, "fund_escrow", args=[aid2],
         value=AMOUNT_ATTO)
@@ -172,11 +174,14 @@ def main():
     print("\nfail-closed (no-URL) agreement state:")
     print(json.dumps({k: ag2[k] for k in
                       ("status", "judgment_decision", "judgment_percent",
-                       "delivery_url")}, indent=2))
+                       "delivery_url", "delivery_window_seconds",
+                       "delivery_deadline_ts")}, indent=2))
     record2 = json.loads(ag2["arbitration_history"][-1])
     print(f"arbitration record: decision={record2['decision']} "
           f"evidence_status={record2['evidence_status']}")
     assert ag2["delivery_url"] == "", "no-URL delivery must store an empty URL"
+    assert ag2["delivery_window_seconds"] == WINDOW
+    assert ag2["delivery_deadline_ts"] > 0, "funding must set the deadline"
     assert record2["decision"] == "REFUND_FULL", \
         "fail-closed: a delivery without URL must refund in full"
     assert record2["evidence_status"] == "no_url_provided"
@@ -192,7 +197,8 @@ def main():
     print("\nfinal agreement state:")
     print(json.dumps({k: ag[k] for k in
                       ("status", "judgment_decision", "judgment_percent",
-                       "appeal_count", "delivery_url")}, indent=2))
+                       "appeal_count", "delivery_url",
+                       "delivery_deadline_ts")}, indent=2))
     record = json.loads(ag["arbitration_history"][-1])
     print(f"arbitration record: decision={record['decision']} "
           f"evidence_status={record['evidence_status']}")
@@ -203,6 +209,10 @@ def main():
     print(f"escrow_pool={pool}  freelancer_credit={cred_f}  client_credit={cred_c}")
     assert cred_f + cred_c == 2 * AMOUNT_ATTO, \
         "payout must equal the two funded escrows exactly"
+    # Conservation invariant across BOTH lifecycles and any parallel state:
+    acc = client.read_contract(address=address, function_name="get_accounting")
+    print("accounting:", json.dumps(acc, default=str))
+    assert acc["invariant_holds"], f"accounting invariant broken: {acc}"
     print("\nOK: full lifecycle executed on studionet with real consensus.")
     print("TX_HASHES=" + json.dumps(hashes))
 

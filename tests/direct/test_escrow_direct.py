@@ -1,14 +1,18 @@
 """Direct-mode unit tests for the Freelance Escrow contract.
 
-NOTE: Direct mode runs the LEADER path only — the comparative validator logic
+NOTE: Direct mode runs the LEADER path only - the comparative validator logic
 inside `_arbitrate` (independent URL fetch + LLM re-run, EXACT label/evidence
-match with NO tolerance, error → disagreement → leader rotation) is NOT
+match with NO tolerance, error -> disagreement -> leader rotation) is NOT
 exercised here. See tests/integration/ for consensus-level coverage.
 """
 
 import json
 
-from conftest import AMOUNT, mock_delivery_fetch, mock_judgment, mock_judgment_raw
+import pytest
+
+from conftest import (AMOUNT, WINDOW, assert_accounting, epoch_of, iso,
+                      set_clock, mock_delivery_fetch, mock_judgment,
+                      mock_judgment_raw)
 
 
 # ---------------------------------------------------------------------------
@@ -18,7 +22,7 @@ from conftest import AMOUNT, mock_delivery_fetch, mock_judgment, mock_judgment_r
 def test_create_and_read_back(escrow, direct_vm):
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "Logo design", "A vector logo, 3 revisions", AMOUNT)
+    contract.create_agreement("a1", freelancer, "Logo design", "A vector logo, 3 revisions", AMOUNT, WINDOW)
 
     ag = contract.get_agreement("a1")
     assert ag["status"] == "created"
@@ -32,7 +36,7 @@ def test_happy_path_no_dispute_full_release(escrow, direct_vm):
     """create -> fund -> deliver -> client approves -> freelancer withdraws all."""
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "Logo design", "A vector logo", AMOUNT)
+    contract.create_agreement("a1", freelancer, "Logo design", "A vector logo", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     assert contract.get_agreement("a1")["status"] == "funded"
@@ -101,7 +105,7 @@ def test_dispute_full_refund(escrow, direct_vm):
 
 
 def test_dispute_split_half(escrow, direct_vm):
-    """A fixed-set split label drives the exact payout — no free-form percent."""
+    """A fixed-set split label drives the exact payout - no free-form percent."""
     contract, client, freelancer, _ = delivered_fixture(escrow, direct_vm)
     direct_vm.sender = freelancer
     contract.raise_dispute("a1", "Client is refusing to approve completed work")
@@ -184,7 +188,7 @@ def test_appeal_path_single_retrigger(escrow, direct_vm):
     assert len(ag["arbitration_history"]) == 2  # full appeal trail retained
     assert ag["arbitration_nonce"] == 2
 
-    # A second appeal is rejected — settlement becomes final.
+    # A second appeal is rejected - settlement becomes final.
     with direct_vm.expect_revert("appeal limit reached"):
         contract.resolve_dispute("a1")
 
@@ -214,7 +218,7 @@ def test_cannot_appeal_after_settlement(escrow, direct_vm):
 def test_only_client_can_fund(escrow, direct_vm):
     contract, client, freelancer, stranger = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
     direct_vm.sender = freelancer
     direct_vm.value = AMOUNT
     with direct_vm.expect_revert("only the client can fund"):
@@ -266,15 +270,15 @@ def test_only_client_can_approve(delivered_agreement, direct_vm):
 def test_duplicate_agreement_id_rejected(escrow, direct_vm):
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
     with direct_vm.expect_revert("already exists"):
-        contract.create_agreement("a1", freelancer, "t2", "spec2", AMOUNT)
+        contract.create_agreement("a1", freelancer, "t2", "spec2", AMOUNT, WINDOW)
 
 
 def test_underpayment_rejected(escrow, direct_vm):
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT - 1
     with direct_vm.expect_revert("expected exactly"):
         contract.fund_escrow("a1")
@@ -283,7 +287,7 @@ def test_underpayment_rejected(escrow, direct_vm):
 def test_overpayment_rejected(escrow, direct_vm):
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT + 1
     with direct_vm.expect_revert("overpayment"):
         contract.fund_escrow("a1")
@@ -315,11 +319,11 @@ def test_empty_fields_rejected(escrow, direct_vm):
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
     with direct_vm.expect_revert("spec must not be empty"):
-        contract.create_agreement("a2", freelancer, "t", "", AMOUNT)
+        contract.create_agreement("a2", freelancer, "t", "", AMOUNT, WINDOW)
     with direct_vm.expect_revert("escrow_amount_atto must be positive"):
-        contract.create_agreement("a3", freelancer, "t", "spec", 0)
+        contract.create_agreement("a3", freelancer, "t", "spec", 0, WINDOW)
     with direct_vm.expect_revert("client and freelancer must differ"):
-        contract.create_agreement("a4", client, "t", "spec", AMOUNT)
+        contract.create_agreement("a4", client, "t", "spec", AMOUNT, WINDOW)
 
 
 def test_nothing_to_withdraw(escrow, direct_vm):
@@ -395,7 +399,7 @@ def test_delivery_url_extraction_is_first_url_only(escrow, direct_vm):
     """Only the first http(s) link becomes verifiable evidence."""
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     direct_vm.value = 0
@@ -418,7 +422,7 @@ def test_arbitration_feeds_own_fetch_into_prompt(escrow, direct_vm):
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
     contract.create_agreement("a1", freelancer, "Landing page",
-                              "3 sections with contact form", AMOUNT)
+                              "3 sections with contact form", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     direct_vm.value = 0
@@ -440,7 +444,7 @@ def test_arbitration_feeds_own_fetch_into_prompt(escrow, direct_vm):
 
 
 def test_unreachable_url_defaults_to_refund_without_llm(escrow, direct_vm):
-    """Un-fetchable artifact => deterministic REFUND_FULL fallback.
+    """Un-fetchable artifact means deterministic REFUND_FULL fallback.
 
     The LLM mock below would answer RELEASE_FULL; the arbitration still
     records REFUND_FULL, proving the fallback short-circuits BEFORE the LLM
@@ -448,7 +452,7 @@ def test_unreachable_url_defaults_to_refund_without_llm(escrow, direct_vm):
     """
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     direct_vm.value = 0
@@ -477,7 +481,7 @@ def test_server_error_url_also_not_payable(escrow, direct_vm):
     """5xx responses are 'not reliably there' - same refund-by-default path."""
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     direct_vm.value = 0
@@ -505,7 +509,7 @@ def test_no_url_delivery_fails_closed_to_refund_without_llm(escrow, direct_vm):
     """
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "Landing page", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     direct_vm.value = 0
@@ -538,7 +542,7 @@ def test_whitespace_only_url_path_also_fails_closed(escrow, direct_vm):
     """A whitespace-only URL argument is treated as no URL at all."""
     contract, client, freelancer, _ = escrow
     direct_vm.sender = client
-    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT)
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")
     direct_vm.value = 0
@@ -553,6 +557,395 @@ def test_whitespace_only_url_path_also_fails_closed(escrow, direct_vm):
     assert ag["judgment_decision"] == "REFUND_FULL"
     record = json.loads(ag["arbitration_history"][0])
     assert record["evidence_status"] == "no_url_provided"
+
+
+# ---------------------------------------------------------------------------
+# Deadline, reclaim, cancel, decline, accounting invariants
+# ---------------------------------------------------------------------------
+
+# Clock control: the direct-mode runner captures the message datetime ONCE,
+# at contract deploy (gltest injects it via fd0 when the module loads), so
+# `direct_vm.warp()` influences contract-visible time only when called BEFORE
+# the deploy. The `funded_clocked` fixture below does exactly that, pinning
+# the whole simulated life of an agreement to a KNOWN epoch with zero drift -
+# the deterministic block-clock behavior the deadline math needs (and closer
+# to real consensus semantics than a live wall clock: on-chain, _now_ts comes
+# from the consensus-signed message, which the live studionet integration
+# test exercises end to end).
+BASE = 1780000000  # 2026-05-28T20:26:40Z, arbitrary fixed anchor
+
+
+@pytest.fixture
+def funded_clocked(direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie):
+    """Deploy + create + fund with the contract clock pinned at BASE.
+
+    Returns (contract, client, freelancer, stranger, deadline_ts) where
+    deadline_ts == BASE + WINDOW exactly (no sub-second drift)."""
+    from conftest import CONTRACT
+    direct_vm.warp(iso(BASE))
+    contract = direct_deploy(CONTRACT)
+    client, freelancer = direct_alice, direct_bob
+    direct_vm.sender = client
+    direct_vm.value = 0
+    contract.create_agreement(
+        "a1", freelancer, "Landing page",
+        "Build a 3-section landing page with a contact form.",
+        AMOUNT, WINDOW,
+    )
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a1")
+    direct_vm.value = 0
+    deadline = contract.get_agreement("a1")["delivery_deadline_ts"]
+    assert deadline == BASE + WINDOW  # the pinned clock is exact
+    return contract, client, freelancer, direct_charlie, deadline
+
+
+def _extract_pure_helpers():
+    """Exec ONLY the module-level pure helper defs from the contract file.
+
+    The contract module as a whole cannot be imported outside the direct-mode
+    loader (its runner 'genlayer' stub is not pip-installed and only one
+    gl.Contract subclass may exist per module), but _days_from_civil and
+    _now_ts are plain functions with no genlayer dependency at definition
+    time, so an ast+exec extraction unit-tests the exact shipped source.
+    """
+    import ast
+    import textwrap
+    src = open("contracts/freelance_escrow.py").read()
+    tree = ast.parse(src)
+    wanted = ["_is_leap", "_days_from_civil", "_now_ts"]
+    ns = {"gl": type("FakeGl", (), {})}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
+    return ns
+
+
+def test_days_from_civil_matches_known_epoch_anchors():
+    """The hand-rolled calendar math must equal the stdlib epoch exactly."""
+    mod = _extract_pure_helpers()
+    known = [
+        ((1970, 1, 1), 0),
+        ((2000, 2, 29), 951782400),   # leap year divisible by 400
+        ((2024, 2, 29), 1709164800),
+        ((2026, 1, 1), 1767225600),
+        ((2026, 2, 28), 1772236800),
+        ((2026, 10, 2), 1790899200),
+        ((2100, 3, 1), 4107542400),   # 2100 is NOT a leap year
+        ((1996, 3, 1), 825638400),    # leap year, day right after Feb 29
+    ]
+    for (y, m, d), want_epoch in known:
+        assert mod["_days_from_civil"](y, m, d) * 86400 == want_epoch
+    assert mod["_is_leap"](2000) and not mod["_is_leap"](2100)
+    assert mod["_is_leap"](2024) and not mod["_is_leap"](2026)
+
+
+def test_now_ts_matches_stdlib_for_both_datetime_formats(escrow, direct_vm):
+    """The contract's _now_ts must agree with the real clock for the two
+    message-datetime shapes seen in practice (Z suffix and +00:00 offset,
+    with and without fractional seconds)."""
+    mod = _extract_pure_helpers()
+    for raw in ("2026-10-02T20:36:20.144555+00:00",
+                "2026-10-02T20:36:20.144555Z",
+                "2026-10-02T20:36:20Z",
+                "2026-10-02 20:36:20"):
+        ns_gl = mod["gl"]
+        ns_gl.message_raw = {"datetime": raw}
+        # 2026-10-02 = day 20728 (epoch anchor above) + 20h*3600 + 36m*60 + 20
+        assert mod["_now_ts"]() == 20728 * 86400 + 20 * 3600 + 36 * 60 + 20, raw
+
+
+def test_window_floor_and_ceiling_rejected(escrow, direct_vm):
+    contract, client, freelancer, _ = escrow
+    direct_vm.sender = client
+    with direct_vm.expect_revert("below floor"):
+        contract.create_agreement("w1", freelancer, "t", "spec", AMOUNT, 3599)
+    with direct_vm.expect_revert("below floor"):
+        contract.create_agreement("w1", freelancer, "t", "spec", AMOUNT, 0)
+    with direct_vm.expect_revert("above ceiling"):
+        contract.create_agreement("w1", freelancer, "t", "spec", AMOUNT, 90 * 24 * 3600 + 1)
+    # The exact bounds themselves are valid.
+    contract.create_agreement("w1", freelancer, "t", "spec", AMOUNT, 3600)
+    contract.create_agreement("w2", freelancer, "t", "spec", AMOUNT, 90 * 24 * 3600)
+    assert_accounting(contract)
+
+
+def test_fund_sets_deadline_from_window(escrow, direct_vm):
+    contract, client, freelancer, _ = escrow
+    direct_vm.sender = client
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, 7200)
+    before = contract.get_agreement("a1")
+    assert before["delivery_deadline_ts"] == 0  # clock starts at FUND, not create
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a1")
+    direct_vm.value = 0
+    ag = contract.get_agreement("a1")
+    assert ag["delivery_window_seconds"] == 7200
+    # The deadline is EXACTLY the funding-message epoch + window (whole
+    # seconds; the contract truncates sub-second precision deterministically).
+    assert ag["delivery_deadline_ts"] == epoch_of(ag["funded_at"]) + 7200
+    assert ag["delivery_deadline_ts"] > 1700000000  # sane epoch magnitude
+    assert_accounting(contract)
+
+
+def test_cancel_agreement_only_in_created(escrow, direct_vm):
+    contract, client, freelancer, stranger = escrow
+    direct_vm.sender = client
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
+    direct_vm.sender = stranger
+    with direct_vm.expect_revert("only the client can cancel"):
+        contract.cancel_agreement("a1")
+    direct_vm.sender = client
+    contract.cancel_agreement("a1")
+    assert contract.get_agreement("a1")["status"] == "cancelled"
+    assert contract.get_escrow_pool() == 0
+    assert_accounting(contract)
+    # Cancelling twice, or after cancel, is refused - and funding afterwards
+    # is impossible: cancelled is terminal.
+    with direct_vm.expect_revert("can only cancel before funding"):
+        contract.cancel_agreement("a1")
+    direct_vm.value = AMOUNT
+    with direct_vm.expect_revert("cannot fund in status"):
+        contract.fund_escrow("a1")
+    direct_vm.value = 0
+
+
+def test_decline_agreement_by_freelancer_refunds_client(escrow, direct_vm):
+    contract, client, freelancer, stranger = escrow
+    direct_vm.sender = client
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a1")
+    direct_vm.value = 0
+    direct_vm.sender = stranger
+    with direct_vm.expect_revert("only the freelancer can decline"):
+        contract.decline_agreement("a1")
+    direct_vm.sender = freelancer
+    contract.decline_agreement("a1")
+    ag = contract.get_agreement("a1")
+    assert ag["status"] == "refunded"
+    assert ag["judgment_decision"] == "REFUND_FULL"
+    record = json.loads(ag["arbitration_history"][0])
+    assert "declined" in record["analysis"]
+    assert contract.get_withdrawable(client) == AMOUNT
+    assert contract.get_withdrawable(freelancer) == 0
+    assert_accounting(contract)
+    # The client withdraws everything; pool returns to 0.
+    direct_vm.sender = client
+    contract.withdraw()
+    assert contract.get_escrow_pool() == 0
+    assert_accounting(contract)
+
+
+def test_late_submit_delivery_rejected_at_deadline_boundary(funded_clocked, direct_vm):
+    contract, client, freelancer, _, deadline = funded_clocked
+    # One second past the deadline: refused.
+    set_clock(direct_vm, deadline + 1)
+    direct_vm.sender = freelancer
+    with direct_vm.expect_revert("delivery deadline expired"):
+        contract.submit_delivery("a1", "https://late.example/work")
+    assert contract.get_agreement("a1")["status"] == "funded"
+    assert_accounting(contract)
+
+
+def test_submit_delivery_exactly_at_deadline_accepted(funded_clocked, direct_vm):
+    contract, client, freelancer, _, deadline = funded_clocked
+    set_clock(direct_vm, deadline)  # ts == deadline is still inside the window
+    direct_vm.sender = freelancer
+    contract.submit_delivery("a1", "https://ontime.example/work")
+    assert contract.get_agreement("a1")["status"] == "delivered"
+    assert_accounting(contract)
+
+
+def test_reclaim_before_deadline_rejected(funded_clocked, direct_vm):
+    contract, client, freelancer, _, deadline = funded_clocked
+    direct_vm.sender = client
+    with direct_vm.expect_revert("early recovery"):
+        contract.reclaim_undelivered("a1")
+    # Even one second BEFORE the deadline is still too early.
+    set_clock(direct_vm, deadline - 1)
+    with direct_vm.expect_revert("early recovery"):
+        contract.reclaim_undelivered("a1")
+    assert contract.get_agreement("a1")["status"] == "funded"
+    assert_accounting(contract)
+
+
+def test_reclaim_exactly_at_deadline_rejected(funded_clocked, direct_vm):
+    """The deadline second belongs to the delivery window, not to reclaim."""
+    contract, client, freelancer, _, deadline = funded_clocked
+    set_clock(direct_vm, deadline)  # ts == deadline: reclaim needs strictly >
+    direct_vm.sender = client
+    with direct_vm.expect_revert("early recovery"):
+        contract.reclaim_undelivered("a1")
+    # The same instant, delivery-side, is still valid (complementary bounds).
+    direct_vm.sender = freelancer
+    contract.submit_delivery("a1", "https://ontime.example/work")
+    assert contract.get_agreement("a1")["status"] == "delivered"
+
+
+def test_reclaim_by_non_client_rejected(funded_clocked, direct_vm):
+    contract, client, freelancer, stranger, deadline = funded_clocked
+    set_clock(direct_vm, deadline + 1)
+    direct_vm.sender = freelancer
+    with direct_vm.expect_revert("only the client can reclaim"):
+        contract.reclaim_undelivered("a1")
+    direct_vm.sender = stranger
+    with direct_vm.expect_revert("only the client can reclaim"):
+        contract.reclaim_undelivered("a1")
+
+
+def test_reclaim_after_deadline_credits_full_escrow_to_client(funded_clocked, direct_vm):
+    contract, client, freelancer, _, deadline = funded_clocked
+    pool_before = contract.get_escrow_pool()
+    set_clock(direct_vm, deadline + 1)
+    direct_vm.sender = client
+    contract.reclaim_undelivered("a1")
+    ag = contract.get_agreement("a1")
+    assert ag["status"] == "refunded"
+    assert ag["judgment_decision"] == "REFUND_FULL"
+    assert ag["judgment_percent"] == 0
+    record = json.loads(ag["arbitration_history"][0])
+    assert "deadline expired without delivery" in record["analysis"]
+    assert contract.get_withdrawable(client) == AMOUNT
+    assert contract.get_withdrawable(freelancer) == 0   # freelancer gets NOTHING
+    assert contract.get_escrow_pool() == pool_before    # funds still escrowed, unwithdrawn
+    assert_accounting(contract)
+    # Full withdraw works and the pool returns to exactly 0.
+    direct_vm.sender = client
+    contract.withdraw()
+    assert contract.get_escrow_pool() == 0
+    assert contract.get_withdrawable(client) == 0
+    assert_accounting(contract)
+
+
+def test_reclaim_after_delivery_rejected(delivered_agreement, direct_vm):
+    contract, client, freelancer = delivered_agreement
+    # Delivered in time: reclaim is impossible forever, its status precheck
+    # refuses regardless of how far the clock later moves.
+    direct_vm.sender = client
+    with direct_vm.expect_revert("funded-but-undelivered"):
+        contract.reclaim_undelivered("a1")
+    assert contract.get_agreement("a1")["status"] == "delivered"
+    assert_accounting(contract)
+
+
+def test_double_reclaim_rejected(funded_clocked, direct_vm):
+    contract, client, freelancer, _, deadline = funded_clocked
+    set_clock(direct_vm, deadline + 1)
+    direct_vm.sender = client
+    contract.reclaim_undelivered("a1")
+    with direct_vm.expect_revert("funded-but-undelivered"):
+        contract.reclaim_undelivered("a1")
+    # Even a forged second call cannot settle twice: the client already holds
+    # exactly one full-escrow credit.
+    assert contract.get_withdrawable(client) == AMOUNT
+    assert_accounting(contract)
+
+
+def test_decline_after_deadline_rejected(funded_clocked, direct_vm):
+    """Once the window closed, the reclaim path is THE exit; decline cannot
+    be used to bypass the timeline semantics."""
+    contract, client, freelancer, _, deadline = funded_clocked
+    set_clock(direct_vm, deadline + 1)
+    direct_vm.sender = freelancer
+    with direct_vm.expect_revert("deadline already expired"):
+        contract.decline_agreement("a1")
+    # And immediately before it, decline still works.
+    set_clock(direct_vm, deadline)
+    contract.decline_agreement("a1")
+    assert contract.get_withdrawable(client) == AMOUNT
+
+
+def test_accounting_invariant_holds_through_happy_lifecycle(escrow, direct_vm):
+    """pool == unwithdrawn + locked checked after EVERY step."""
+    contract, client, freelancer, _ = escrow
+    assert_accounting(contract)  # empty contract: 0 == 0 + 0
+    direct_vm.sender = client
+    contract.create_agreement("a1", freelancer, "t", "spec", AMOUNT, WINDOW)
+    assert_accounting(contract)
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a1")
+    direct_vm.value = 0
+    assert_accounting(contract)
+    direct_vm.sender = freelancer
+    contract.submit_delivery("a1", "https://good.example/work")
+    assert_accounting(contract)
+    direct_vm.sender = client
+    contract.approve_delivery("a1")
+    acc = assert_accounting(contract)
+    assert acc["unwithdrawn_credits_atto"] == AMOUNT
+    assert acc["locked_escrow_atto"] == 0
+    direct_vm.sender = freelancer
+    contract.withdraw()
+    acc = assert_accounting(contract)
+    assert acc["escrow_pool_atto"] == 0
+
+
+def test_accounting_invariant_holds_through_dispute_and_appeal(escrow, direct_vm):
+    """The invariant survives the messy path: dispute, arbitration, appeal,
+    settlement, partial withdrawals, second agreement in parallel."""
+    contract, client, freelancer, _ = delivered_fixture(escrow, direct_vm)
+    # A second parallel funded agreement - partial states must still balance.
+    direct_vm.sender = client
+    contract.create_agreement("a2", freelancer, "t2", "spec2", AMOUNT, WINDOW)
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a2")
+    direct_vm.value = 0
+    assert_accounting(contract)
+
+    direct_vm.sender = client
+    contract.raise_dispute("a1", "not complete")
+    assert_accounting(contract)
+    mock_judgment(direct_vm, "REFUND_FULL")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "broken")
+    contract.resolve_dispute("a1")
+    assert_accounting(contract)
+    # Appeal path
+    mock_judgment(direct_vm, "SPLIT_HALF")
+    mock_delivery_fetch(direct_vm, r"delivered\.example/a1", "half")
+    direct_vm.sender = freelancer
+    contract.resolve_dispute("a1")
+    assert_accounting(contract)
+    direct_vm.sender = client
+    contract.accept_resolution("a1")
+    acc = assert_accounting(contract)
+    assert acc["unwithdrawn_credits_atto"] == AMOUNT  # 50/50 split, all inside a1
+    # Withdraw one party only: the other half stays unwithdrawn.
+    direct_vm.sender = freelancer
+    contract.withdraw()
+    acc = assert_accounting(contract)
+    assert acc["escrow_pool_atto"] == AMOUNT + AMOUNT // 2  # a2 + client's half
+
+
+def test_accounting_invariant_holds_through_reclaim_and_withdraw(funded_clocked, direct_vm):
+    """Reclaim + full withdraw under a pinned clock keeps the identity at
+    every step, with a second funded agreement held in parallel."""
+    contract, client, freelancer, _, deadline = funded_clocked
+    direct_vm.sender = client
+    contract.create_agreement("a2", freelancer, "t2", "spec2", AMOUNT, WINDOW)
+    direct_vm.value = AMOUNT
+    contract.fund_escrow("a2")
+    direct_vm.value = 0
+    acc = assert_accounting(contract)
+    assert acc["locked_escrow_atto"] == 2 * AMOUNT
+    set_clock(direct_vm, deadline + 1)
+    contract.reclaim_undelivered("a1")
+    acc = assert_accounting(contract)
+    assert acc["unwithdrawn_credits_atto"] == AMOUNT
+    assert acc["locked_escrow_atto"] == AMOUNT  # only a2 still locked
+    direct_vm.sender = client
+    contract.withdraw()
+    acc = assert_accounting(contract)
+    assert acc["escrow_pool_atto"] == AMOUNT  # a2's deposit remains
+    # a2's deadline reclaim + final withdraw empties the contract exactly.
+    a2_funded = epoch_of(contract.get_agreement("a2")["funded_at"])
+    set_clock(direct_vm, a2_funded + WINDOW + 1)  # strictly past a2's deadline
+    contract.reclaim_undelivered("a2")
+    contract.withdraw()
+    acc = assert_accounting(contract)
+    assert acc["escrow_pool_atto"] == 0
+    assert acc["unwithdrawn_credits_atto"] == 0
+    assert acc["locked_escrow_atto"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +964,7 @@ def delivered_fixture(escrow, direct_vm):
     direct_vm.sender = client
     contract.create_agreement(
         "a1", freelancer, "Landing page",
-        "Build a 3-section landing page with a contact form.", AMOUNT,
+        "Build a 3-section landing page with a contact form.", AMOUNT, WINDOW,
     )
     direct_vm.value = AMOUNT
     contract.fund_escrow("a1")

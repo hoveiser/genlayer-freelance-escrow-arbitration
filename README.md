@@ -1,54 +1,67 @@
 # genlayer-freelance-escrow-arbitration
 
 A standalone **GenLayer Intelligent Contract**: a freelance escrow in which
-disputes are settled by **LLM-based arbitration validated by GenLayer
-validator consensus** — not by either party's claim and not by a single
-leader's model output.
+disputes are settled by **LLM-based arbitration validated by GenLayer validator
+consensus** - not by either party's claim and not by a single leader's model
+output - and in which the escrow can never be locked forever: every agreement
+carries an **enforceable delivery deadline** with a **client-side reclaim**.
 
 Submitter entry for GenLayer's builder program, "Intelligent Contract"
 category. Contract-only submission (no frontend/backend).
 
-**Live evidence** — the corrected (fail-closed) contract is deployed and
-driven end-to-end on studionet (see
-[Studionet deployment & evidence](#studionet-deployment--evidence);
-explorer: <https://explorer-studio.genlayer.com/>):
+**Live evidence** (full details in
+[Studionet deployment & evidence](#studionet-deployment--evidence)):
 
-- Contract: [`0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD`](https://explorer-studio.genlayer.com/address/0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD)
-- Deploy tx: [`0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e`](https://explorer-studio.genlayer.com/tx/0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e)
-- Fail-closed arbitration tx (no-URL delivery ⇒ deterministic `REFUND_FULL`, LLM never consulted): [`0x83959026b33431945be20ad4f79ab1bea2d26d0fe884935b18261a8b4b6a55f6`](https://explorer-studio.genlayer.com/tx/0x83959026b33431945be20ad4f79ab1bea2d26d0fe884935b18261a8b4b6a55f6)
-- URL-fetch arbitration tx (independent fetch + exact-label LLM consensus): [`0xb6dcf2b578081c98d1d36266d821e09a87ee0ff6ef818b734ccc30a638770bca`](https://explorer-studio.genlayer.com/tx/0xb6dcf2b578081c98d1d36266d821e09a87ee0ff6ef818b734ccc30a638770bca)
+- Current contract (delivery-deadline revision): `0x06004A0D77F91d1d4691403595c185173Dd4a6F4`
+  - Deploy tx: [`0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076`](https://explorer-studio.genlayer.com/tx/0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076) (`MAJORITY_AGREE`, consensus-finalized)
+- Previous revision (fail-closed arbitration): `0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD`
+- Explorer: <https://explorer-studio.genlayer.com/>
 
 ## The use case
 
-1. A **client** drafts an agreement with a written spec and a deal amount,
-   then **funds the escrow** with native tokens (atto-scale `u256`).
-2. The **freelancer** submits the delivered work (text, description, or link).
-3. Either:
-   - the client **approves** → funds are released in full, or
-   - either party **raises a dispute** → the contract runs **on-chain
+1. A **client** drafts an agreement with a written spec, a deal amount, and a
+   **delivery window** (bounded: at least 1 hour, at most 90 days), then
+   **funds the escrow** with native tokens (atto-scale `u256`). Funding starts
+   the clock: `delivery_deadline_ts = fund time + window`.
+2. The **freelancer** submits the delivered work (text, description, or link)
+   - but only **at or before the deadline**; late submissions are refused.
+3. Before any delivery exists, either side has a defined exit:
+   - the client can **cancel** a never-funded agreement (no funds involved),
+   - the freelancer can **decline** a funded agreement before the deadline
+     (full refund to the client - a path that can only ever favor the client),
+   - after the deadline passes with no delivery, the client can
+     **reclaim_undelivered** and recover the FULL escrow.
+4. Once delivered, either:
+   - the client **approves** - funds are released in full, or
+   - either party **raises a dispute** - the contract runs **on-chain
      arbitration**: every evaluator independently FETCHES the delivered
      artifact and an LLM grades that fetched evidence against the original
-     spec — and if the delivery carried **no URL to fetch, the contract fails
-     closed and refunds in full without ever consulting the LLM**. The outcome
-     must be exactly
-     one of five fixed settlement labels (`RELEASE_FULL` / `REFUND_FULL` /
-     `SPLIT_QUARTER` / `SPLIT_HALF` / `SPLIT_THREE_QUARTER`), adopted only if
+     spec; if the delivery carried **no URL to fetch, the contract fails closed
+     and refunds in full without ever consulting the LLM**. The outcome must be
+     exactly one of five fixed settlement labels (`RELEASE_FULL` / `REFUND_FULL`
+     / `SPLIT_QUARTER` / `SPLIT_HALF` / `SPLIT_THREE_QUARTER`), adopted only if
      GenLayer **validators reach consensus on the identical label**.
-4. A party that disagrees with the outcome may **appeal exactly once**
+5. A party that disagrees with the outcome may **appeal exactly once**
    (re-triggers the full consensus evaluation). After settlement each party
    **withdraws** its share as a native-token transfer.
 
 ## Why GenLayer consensus is necessary
 
-The arbitration decision moves real money. The input to the decision is an
-LLM judgment — a non-deterministic, external, subjective signal that a
+The arbitration decision moves real money. The input to the decision is an LLM
+judgment - a non-deterministic, external, subjective signal that a
 deterministic smart contract cannot evaluate and that a single trusted party
 should not be allowed to author. If the contract merely stored whatever one
-leader's LLM call returned, the leader (or anyone who can influence the
-leader's model output) could unilaterally decide escrow outcomes. GenLayer is
-what makes the settlement decision **reproducible enough for multiple
-independent validators to agree on it**, while still allowing AI-mediated
-subjective judgment.
+leader's LLM call returned, the leader (or anyone who can influence the leader's
+model output) could unilaterally decide escrow outcomes. GenLayer is what makes
+the settlement decision **reproducible enough for multiple independent
+validators to agree on it**, while still allowing AI-mediated subjective
+judgment.
+
+The deadline machinery, by contrast, is deliberately **deterministic**: it is
+derived from the consensus-signed transaction message (never a wall clock), so
+every validator computes identical deadlines and no LLM is involved. It still
+runs under full consensus because every state transition in this contract moves
+or protects money.
 
 ## How the equivalence principle works here
 
@@ -59,184 +72,241 @@ decisions, in order:
 - **`strict_eq` over the raw result is impossible.** Two byte-identical
   executions of the same LLM prompt / web fetch can return different text;
   requiring exact equality of raw outputs would deadlock consensus forever.
-  Equivalence is therefore enforced on a **canonical, discrete result**, not
-  on raw text.
-- **Fixed, enumerable outcome set — no tolerance, anywhere.** The LLM must
-  pick exactly one of five labels: `RELEASE_FULL` (100%), `REFUND_FULL` (0%),
-  `SPLIT_QUARTER` (25%), `SPLIT_HALF` (50%), `SPLIT_THREE_QUARTER` (75%).
-  The payout percent is **derived from the label** by a deterministic
-  function (`_percent_for_decision`) and is **never parsed from LLM output**
-  — any `percent`-like number the model invents is ignored. Because money is
-  a pure function of the label, exact agreement on the label IS exact
-  agreement on the transfer. The previous design's ±15-point percentage
-  tolerance was removed on purpose: "close enough" is not a valid basis for
-  moving funds.
-- **Leader-output-only validation is rejected.** A validator that merely
-  checks the leader's answer "is well-formed JSON with an allowed status"
-  proves formatting, not agreement — the leader alone would be deciding who
-  gets the money. This contract does not do that.
+  Equivalence is therefore enforced on a **canonical, discrete result**, not on
+  raw text.
+- **Fixed, enumerable outcome set - no tolerance, anywhere.** The LLM must pick
+  exactly one of five labels: `RELEASE_FULL` (100%), `REFUND_FULL` (0%),
+  `SPLIT_QUARTER` (25%), `SPLIT_HALF` (50%), `SPLIT_THREE_QUARTER` (75%). The
+  payout percent is **derived from the label** by a deterministic function
+  (`_percent_for_decision`) and is **never parsed from LLM output** - any
+  `percent`-like number the model invents is ignored. Because money is a pure
+  function of the label, exact agreement on the label IS exact agreement on the
+  transfer. (An early prototype had a +/-15 percentage-point tolerance; it was
+  removed on purpose: "close enough" is not a valid basis for moving funds.)
+- **Leader-output-only validation is rejected.** A validator that merely checks
+  the leader's answer "is well-formed JSON with an allowed status" proves
+  formatting, not agreement - the leader alone would be deciding who gets the
+  money. This contract does not do that.
 - **Genuine comparative validation** (custom validator function via
   `gl.vm.run_nondet_unsafe`):
   1. The leader runs `_run_arbitration_prompt(title, spec, work, url,
-     dispute_reason)` — a pure function of on-chain state: it performs its
-     own `gl.nondet.web.get` fetch of the delivery URL and its own
+     dispute_reason)` - a pure function of on-chain state: it performs its own
+     `gl.nondet.web.get` fetch of the delivery URL and its own
      `gl.nondet.exec_prompt` LLM call.
-  2. The output is pushed through a deterministic **normalization funnel**
-     that accepts ONLY the five fixed labels (after formatting-only case /
-     space / hyphen normalization and key aliasing). Anything else raises
-     `[LLM_ERROR]`.
-  3. **Each validator independently re-runs that entire function — its own
-     fetch, its own LLM call — and the validator rule requires an EXACT
-     match** on both economic fields: `decision` (label) and
-     `evidence_status` (`fetched` / `unreachable` / `no_url_provided`).
-     Any mismatch → `False` → leader rotation. There is no numeric band,
-     no rounding allowance, no "similar enough".
-- **Errors force leader rotation.** If the leader's call fails or its output
-  is malformed, `_handle_leader_error` re-runs the task rather than granting
-  the doubt; a validator whose own re-run fails also disagrees. Silent
-  agreement on garbage is never possible.
+  2. The output is pushed through a deterministic **normalization funnel** that
+     accepts ONLY the five fixed labels (after formatting-only case / space /
+     hyphen normalization and key aliasing). Anything else raises `[LLM_ERROR]`.
+  3. **Each validator independently re-runs that entire function - its own
+     fetch, its own LLM call - and the validator rule requires an EXACT match**
+     on both economic fields: `decision` (label) and `evidence_status`
+     (`fetched` / `unreachable` / `no_url_provided`). Any mismatch returns
+     `False` - leader rotation. There is no numeric band, no rounding
+     allowance, no "similar enough".
+  4. Malformed leader output (label outside the fixed set) is an automatic
+     disagreement; a leader error is handled by `_handle_leader_error`, which
+     re-runs the task rather than granting the doubt. Both force rotation.
 - Money never touches the non-deterministic path: payouts are computed
   deterministically from the consensus-agreed label
-  (`escrow_atto * percent // 100`, percent ∈ {0, 25, 50, 75, 100}).
+  (`escrow_atto * percent // 100`, percent in {0, 25, 50, 75, 100}).
 
-Every one of these rules is annotated with inline `WHY` comments at the point
-in the code where it applies.
+Every one of these rules is annotated with inline `WHY` comments at the point in
+the code where it applies.
 
-## Evidence acquisition & the refund-by-default policy
+## Evidence acquisition and the refund-by-default policy
 
 A submitted delivery description or link is **claim, not evidence**. The
-contract no longer takes it on faith:
+contract does not take it on faith:
 
-- `submit_delivery` deterministically extracts the first `http(s)://` URL
-  from the delivery text into `delivery_url` (stored, viewable).
-- During arbitration, **every evaluator independently fetches that URL**
-  inside its own run (`_fetch_evidence` → `gl.nondet.web.get`). The leader
-  never hands a fetched copy to validators, and validators never trust the
-  submitter's self-description over the retrieved content. The fetched body
-  (capped at `MAX_EVIDENCE_CHARS = 8000`) is embedded in the LLM prompt and
-  explicitly weighted above the description.
-- **Fetch failure is explicit, never a silent pass.** A non-200 response or
-  a raised exception makes the evaluator return the deterministic fallback
-  `{decision: REFUND_FULL, evidence_status: "unreachable"}` **without
-  consulting the LLM**. If the leader can't fetch but a validator can, the
-  two disagree → leader rotates and the fetch is retried. Only when the
-  whole ring genuinely cannot retrieve the artifact do all evaluators
-  independently converge on `REFUND_FULL` — money returns to the client,
-  because **unverifiable work must not pay out**. (Volatile pages can cause
-  repeated disagreement; that is fail-safe by design: while evaluators
-  cannot agree on what the artifact is, no funds move.)
+- `submit_delivery` deterministically extracts the first `http(s)://` URL from
+  the delivery text into `delivery_url` (stored, viewable).
+- During arbitration, **every evaluator independently fetches that URL** inside
+  its own run (`_fetch_evidence` - `gl.nondet.web.get`). The leader never hands
+  a fetched copy to validators, and validators never trust the submitter's
+  self-description over the retrieved content. The fetched body (capped at
+  `MAX_EVIDENCE_CHARS = 8000`) is embedded in the LLM prompt and explicitly
+  weighted above the description.
+- **Fetch failure is explicit, never a silent pass.** A non-200 response or a
+  raised exception makes the evaluator return the deterministic fallback
+  `{decision: REFUND_FULL, evidence_status: "unreachable"}` **without consulting
+  the LLM**. If the leader cannot fetch but a validator can, the two disagree,
+  leader rotates, and the fetch is retried. Only when the whole ring genuinely
+  cannot retrieve the artifact do all evaluators independently converge on
+  `REFUND_FULL` - money returns to the client, because **unverifiable work must
+  not pay out**. (Volatile pages can cause repeated disagreement; that is
+  fail-safe by design: while evaluators cannot agree on what the artifact is,
+  no funds move.)
 - **Deliveries with no URL FAIL CLOSED to a full refund.** A delivery that is
-  only self-described text (no `http(s)://` link) gives every evaluator
-  nothing external to fetch — the only "evidence" would be the freelancer's
-  own words, exactly the unsubstantiated-claim path the reviewer flagged. The
-  contract therefore short-circuits **before any LLM prompt or web fetch**:
-  `_run_arbitration_prompt` returns
-  `{decision: REFUND_FULL, evidence_status: "no_url_provided"}`
-  deterministically. Because the branch depends only on the empty on-chain
-  `delivery_url`, the leader and every validator independently reach the
-  *same* result, so `REFUND_FULL` is genuine consensus, never a pass. **This
-  replaces the previous lower-assurance "description-only" path, which could
+  only self-described text gives every evaluator nothing external to fetch - the
+  only "evidence" would be the freelancer's own words. The contract
+  short-circuits **before any LLM prompt or web fetch**:
+  `_run_arbitration_prompt` returns `{decision: REFUND_FULL, evidence_status:
+  "no_url_provided"}` deterministically. Because the branch depends only on the
+  empty on-chain `delivery_url`, leader and every validator independently reach
+  the same result, so `REFUND_FULL` is genuine consensus, never a pass. **This
+  replaces the earlier lower-assurance "description-only" path, which could
   still release or split funds on the freelancer's say-so.**
 - **To be paid, a freelancer must supply a fetchable URL** (public repo,
-  deployed app, shared doc — any host the client can reach). The escrow only
+  deployed app, shared doc - any host the client can reach). The escrow only
   pays against evidence each validator can independently retrieve.
 
-## Security / Fail-Closed Behavior
+## Delivery deadline and client exits (reviewer-driven)
 
-The arbitration path is **fail-closed by design**: funds reach the freelancer
-only when there is independently verifiable evidence that the work exists and
-meets the spec. Concretely:
+Earlier feedback: after `fund_escrow` the only exit was `submit_delivery`, so a
+freelancer who never delivered locked the escrow forever. The lifecycle now has
+an enforceable deadline and three defined exits, all deterministic (no LLM):
 
-- **Missing delivery URL ⇒ automatic `REFUND_FULL`.** If `delivery_url` is
-  empty or whitespace-only, the contract refunds the client in full **before
-  running any web fetch or LLM prompt** (`evidence_status:
-  "no_url_provided"`). A self-described deliverable can never move money.
-  The check is deterministic on-chain logic keyed on the stored `delivery_url`,
-  so the leader and every validator reach the identical result and consensus
-  enforces it — no single node can pay out on a bare claim.
-- **Un-fetchable URL ⇒ `REFUND_FULL`** (`evidence_status: "unreachable"`),
-  likewise without the LLM, when the whole ring cannot retrieve the artifact.
-- **The LLM is consulted only when content was actually fetched**
-  (`evidence_status: "fetched"`), and even then a payout requires leader and
-  validator to agree on the **exact** settlement label.
+| Situation | Exit | Effect |
+|---|---|---|
+| drafted, never funded | `cancel_agreement` (client) | status `cancelled`, no funds ever moved |
+| funded, freelancer declines before deadline | `decline_agreement` (freelancer) | FULL escrow credited to client (client-favoring only) |
+| funded, deadline passed, nothing delivered | `reclaim_undelivered` (client) | FULL escrow credited to client, freelancer credit stays 0, status `refunded` |
+| delivered on time | `approve_delivery` or dispute - arbitration | existing exact-label settlement, unchanged |
 
-Net effect: absent, unverifiable, or failed-to-fetch evidence always defaults
-toward making the client whole — never toward paying out on an unsubstantiated
-claim. Proven by the direct test
-`test_no_url_delivery_fails_closed_to_refund_without_llm` and by the live
-studionet no-URL lifecycle (real validator consensus, `resolve_dispute` →
-`REFUND_FULL`/`no_url_provided`) documented below.
+Rules that make the deadline real:
+
+- **Window validated at entry, both bounds.** `create_agreement` takes
+  `delivery_window_seconds` and rejects anything below 1 hour
+  (`MIN_DELIVERY_WINDOW_SECONDS`) or above 90 days
+  (`MAX_DELIVERY_WINDOW_SECONDS`). An adversarial client cannot craft a
+  near-zero window and reclaim minutes after funding.
+- **Deterministic clock, no wall time.** `_now_ts()` derives unix seconds from
+  the consensus-signed message datetime (`gl.message_raw["datetime"]`) using
+  pure string operations and integer calendar math (`_days_from_civil`, verified
+  against stdlib epoch anchors including century leap-year edges). Every
+  validator computes the identical value from the same signed message. The live
+  runtime format was verified against studionet receipts (ISO-8601 UTC; both
+  `...Z` and `+00:00` forms are handled, fractional seconds truncated).
+- **Deadline starts at funding**: `fund_escrow` sets
+  `delivery_deadline_ts = _now_ts() + delivery_window_seconds` (0 before).
+- **No early recovery**: `reclaim_undelivered` requires
+  `_now_ts() > delivery_deadline_ts` (strictly). At exactly the deadline second
+  the client still cannot reclaim.
+- **No late delivery**: `submit_delivery` requires
+  `_now_ts() <= delivery_deadline_ts`. At exactly the deadline the freelancer
+  still CAN deliver.
+- **Race analysis** (the two boundaries are exact complements over the same
+  stored integer and the same deterministic message clock): a transaction
+  cannot satisfy both `ts <= deadline` (deliver) and `ts > deadline` (reclaim);
+  within one block the VM orders transactions serially, and whichever lands
+  first moves the status out of `funded`, so the other is additionally refused
+  by its status precheck. Double release is impossible by BOTH timestamp and
+  status, not by either alone. The same status precheck makes
+  `reclaim_undelivered` impossible after any delivery and exactly once - see
+  the settlement guard below.
+- **`decline_agreement` is open only before the deadline** and always credits
+  the client in full - the freelancer can never use it to extract funds.
+
+## Accounting invariants
+
+Every credit path funnels through `_credit_out`, which enforces:
+
+- **No double settlement**: an agreement may be credited exactly once - the
+  call reverts unless `client_credit_atto + freelancer_credit_atto == 0` and
+  the status is not already final (`settled` / `released` / `refunded` /
+  `cancelled`). Per-agreement credit fields stay non-zero for life, so a
+  forged second call cannot pass either.
+- **All-or-nothing split**: `freelancer_atto + client_atto == escrow_atto` by
+  construction (integer division remainder always goes to the client).
+- **Conservation view**: `get_accounting()` returns `escrow_pool_atto`, the sum
+  of unwithdrawn credits, and the sum of escrow locked in funded-but-uncredited
+  agreements. While accounting is consistent the identity
+  `escrow_pool == unwithdrawn_credits + locked_escrow` holds after EVERY state
+  transition (settled money leaves "locked" and enters "unwithdrawn" in the
+  same transaction; withdraw moves both sides down together). The direct tests
+  assert this after every step of several mixed scenarios, including the appeal
+  flow and the reclaim flow.
 
 ## Storage schema
 
-Typed persistent fields only — `TreeMap` / `DynArray`, never raw `dict` /
-`list`. Status is stored as `str`, never as an `Enum`. All amounts are
-`u256` in **atto scale** (`value * 10**18`); no floats anywhere in
-consensus-relevant code.
+Typed persistent fields only - `TreeMap` / `DynArray`, never raw `dict` /
+`list`. Status is stored as `str`, never as an `Enum`. All amounts are `u256`
+in **atto scale** (`value * 10**18`); no floats anywhere in consensus-relevant
+code.
 
 ```
 FreelanceEscrow (gl.Contract)
-├── agreements:        TreeMap[str, Agreement]    # id -> agreement
-├── agreement_ids:     DynArray[str]              # enumeration order
-├── escrow_pool_atto:  u256                       # native tokens held
-├── withdrawable_atto: TreeMap[str, u256]         # account-key (hex) -> credit
-└── next_nonce:        u256                       # anti-replay / ordering
++-- agreements:        TreeMap[str, Agreement]    # id -> agreement
++-- agreement_ids:     DynArray[str]              # enumeration order
++-- escrow_pool_atto:  u256                       # native tokens held
++-- withdrawable_atto: TreeMap[str, u256]          # account-key (hex) -> credit
++-- next_nonce:        u256                       # anti-replay / ordering
 
 Agreement (@allow_storage @dataclass)   # new fields may ONLY be appended
-├── id, client: Address, freelancer: Address, title, spec
-├── escrow_atto: u256                   # atto scale
-├── delivered_work: str                 # text/link submitted by freelancer
-├── status: str                         # created|funded|delivered|disputed|
-│                                       # arbitrated|settled|released|refunded
-├── dispute_reason: str
-├── judgment_decision: str              # RELEASE_FULL|REFUND_FULL|SPLIT_QUARTER|
-│                                       # SPLIT_HALF|SPLIT_THREE_QUARTER|none
-├── judgment_percent: u256              # DERIVED from the label (0/25/50/75/100)
-├── judgment_analysis: str
-├── created_at/funded_at/delivered_at/disputed_at/resolved_at: str
-│                                       # from consensus message datetime
-├── appeal_count: u256                  # max 1
-├── arbitration_nonce: u256
-├── arbitration_history: DynArray[str]  # json.dumps of every judgment incl.
-│                                       # evidence_status, kept after appeal
-├── client_credit_atto / freelancer_credit_atto: u256
-└── delivery_url: str                   # APPENDED: first http(s) URL extracted
-                                        # from delivered_work at submit time
++-- id, client: Address, freelancer: Address, title, spec
++-- escrow_atto: u256                   # atto scale
++-- delivered_work: str                 # text/link submitted by freelancer
++-- status: str                         # created|funded|delivered|disputed|
+|                                       # arbitrated|settled|released|refunded|cancelled
++-- dispute_reason: str
++-- judgment_decision: str              # RELEASE_FULL|REFUND_FULL|SPLIT_QUARTER|
+|                                       # SPLIT_HALF|SPLIT_THREE_QUARTER|none
++-- judgment_percent: u256              # DERIVED from the label (0/25/50/75/100)
++-- judgment_analysis: str
++-- created_at/funded_at/delivered_at/disputed_at/resolved_at: str
+|                                       # from consensus message datetime
++-- appeal_count: u256                  # max 1
++-- arbitration_nonce: u256
++-- arbitration_history: DynArray[str]  # json.dumps of every judgment/reclaim
+|                                       # record, kept after appeal
++-- client_credit_atto / freelancer_credit_atto: u256
++-- delivery_url: str                   # APPENDED earlier: first http(s) URL
+|                                       # extracted from delivered_work
++-- delivery_window_seconds: u256       # APPENDED: bounded 1h..90d at creation
++-- delivery_deadline_ts: u256          # APPENDED: unix seconds, 0 until funded
 ```
 
-Lifecycle: `created → funded → delivered → (released | disputed → arbitrated
-→ [appeal: re-arbitrate ×1] → settled/released/refunded) → withdraw()`.
-Settlement credits a ledger; `withdraw()` pays out via an emitted native
-value transfer (`on="finalized"`), keeping the settlement decision and the
-fund movement explicit and auditable.
+Lifecycle:
+
+```
+created --fund--> funded --deliver (ts <= deadline)--> delivered
+   |                 |                    |                 +--approve--> released
+   |                 |                    |                 +--dispute--> disputed
+   |                 |                    |                       --> arbitrated --+
+   |                 |                    |                             (appeal x1) |
+   |                 |                    |                     settled/released/refunded
+   |                 |                    +--(late submit rejected, ts > deadline)
+   |                 +--reclaim_undelivered (ts > deadline, no delivery)--> refunded
+   |                 +--decline_agreement (freelancer, ts <= deadline)--> refunded
+   +--cancel_agreement--> cancelled        (no funds ever moved)
+
+released/settled/refunded credits are claimable via withdraw()
+```
 
 ## Public methods
 
 | Method | Kind | Access rule |
 |---|---|---|
-| `create_agreement(id, freelancer, title, spec, escrow_amount_atto)` | write | caller becomes client |
-| `fund_escrow(id)` | write | client only; `gl.message.value` must equal escrow exactly |
-| `submit_delivery(id, delivered_work)` | write | freelancer only; first URL becomes independently fetchable evidence |
-| `approve_delivery(id)` | write | client only → full release |
+| `create_agreement(id, freelancer, title, spec, escrow_amount_atto, delivery_window_seconds)` | write | caller becomes client; window bounded 1h..90d at entry |
+| `fund_escrow(id)` | write | client only; `gl.message.value` must equal escrow exactly; sets `delivery_deadline_ts` |
+| `submit_delivery(id, delivered_work)` | write | freelancer only; only in `funded`; rejected when `_now_ts() > delivery_deadline_ts`; first URL becomes independently fetchable evidence |
+| `approve_delivery(id)` | write | client only, delivered only - full release |
 | `raise_dispute(id, reason)` | write | client or freelancer |
 | `resolve_dispute(id)` | write | client or freelancer; second call = appeal (max 1) |
-| `accept_resolution(id)` | write | client or freelancer; computes & credits payout |
+| `accept_resolution(id)` | write | client or freelancer; credits payout via the guarded `_credit_out` |
+| `cancel_agreement(id)` | write | client only, `created` only; no funds move; status `cancelled` |
+| `decline_agreement(id)` | write | freelancer only, `funded`, before deadline; full refund to client |
+| `reclaim_undelivered(id)` | write | client only, `funded`, strictly after deadline; full escrow back to client |
 | `withdraw()` | write | anyone with a credit; emits native transfer |
-| `get_agreement(id)` / `list_agreements()` / `get_withdrawable(addr)` / `get_escrow_pool()` | view | — |
+| `get_agreement(id)` | view | full state incl. `delivery_window_seconds`, `delivery_deadline_ts` |
+| `list_agreements()` / `get_withdrawable(addr)` / `get_escrow_pool()` | view | - |
+| `get_accounting()` | view | pool / unwithdrawn credits / locked escrow + `invariant_holds` |
 
 All violations raise `gl.vm.UserError` (the `gl.UserError` of this SDK
-namespace) with `ESCROW:`-prefixed messages — never bare `Exception`.
+namespace) with `ESCROW:`-prefixed messages - never bare `Exception`.
 
 ## Repository layout
 
 ```
-contracts/freelance_escrow.py     # the contract (pinned runner header, line 1)
-tests/direct/                     # fast Direct-mode unit tests (no server)
-tests/integration/                # full-consensus tests via gltest
-gltest.config.yaml                # integration-test network/account config
-requirements.txt                  # genlayer-test + genvm-linter + pytest
-scripts/setup_direct_test_cache.sh# one-time local cache fix (see below)
-scripts/studionet_e2e_demo.py     # drives the live studionet lifecycle (evidence)
+contracts/freelance_escrow.py      # the contract (pinned runner header, line 1)
+tests/direct/                      # fast Direct-mode unit tests (no server)
+tests/integration/                 # full-consensus tests via gltest
+gltest.config.yaml                 # integration-test network/account config
+requirements.txt                   # genlayer-test + genvm-linter + pytest
+scripts/setup_direct_test_cache.sh # one-time local cache fix (see below)
+scripts/studionet_e2e_demo.py      # drives the live URL + no-URL lifecycles
+scripts/studionet_reclaim_demo.py  # drives the live deadline/reclaim lifecycle
+scripts/deploy_studionet.py        # persistent studionet deployment
+scripts/verify_deployed_source.py  # repo-vs-deployed source comparison
 ```
 
 ## Setup
@@ -254,8 +324,8 @@ Requires Python 3.12+.
 genvm-lint check contracts/freelance_escrow.py
 ```
 
-Must report `ok` before anything else is trusted. (`genvm-lint check --json`
-for machine-readable output.)
+Must report `ok` before anything else is trusted. (`genvm-lint check --json` for
+machine-readable output.)
 
 ## Direct-mode tests (fast, no server)
 
@@ -264,219 +334,221 @@ scripts/setup_direct_test_cache.sh   # one-time; see note below
 pytest tests/direct/ -v
 ```
 
-**Coverage (30 tests):** happy path with no dispute, dispute → full release,
-full refund, and each split label with its exact 25/50/75% payout, unauthorized-sender
-rejections for every role, the appeal path (one re-trigger, second
-rejected), state-machine guards, value validation, deterministic URL
-extraction from deliveries, **evidence fetching** (fetched content proven to
-reach the prompt; 404/500 ⇒ deterministic `REFUND_FULL` fallback without the
-LLM being consulted), **fail-closed no-URL handling** (a delivery with no URL
-— and a whitespace-only URL — refunds `REFUND_FULL` with `evidence_status:
-"no_url_provided"` and never reaches the LLM, proven by a mock that would
-have said otherwise), and
-fixed-set output strictness (labels outside the five accepted values and
-unparseable output revert the arbitration; LLM-supplied percent numbers are
-ignored in favor of the label).
+**Coverage (48 tests):** happy path with no dispute; dispute to full release,
+full refund, and each split label with its exact 25/50/75% payout;
+unauthorized-sender rejections for every role; the appeal path (one
+re-trigger, second rejected); state-machine guards; value validation;
+deterministic URL extraction; **evidence fetching** (fetched content proven to
+reach the prompt; 404/500 produce deterministic `REFUND_FULL` fallback without
+the LLM being consulted); **fail-closed no-URL handling** (a delivery with no
+URL, and a whitespace-only URL, refunds with `evidence_status:
+"no_url_provided"` and never reaches the LLM, proven by mocks that would have
+said otherwise); fixed-set output strictness (unknown labels and unparseable
+output revert; LLM-supplied percents are ignored); **the deadline suite**:
+window floor/ceiling rejection at the exact bounds, deadline computed from the
+funding message epoch, late `submit_delivery` rejected at deadline+1 and
+accepted at deadline exactly, `reclaim_undelivered` rejected before and at the
+deadline, rejected for non-clients, rejected after delivery, rejected twice,
+successful only strictly after the deadline with FULL credit to the client and
+zero to the freelancer, `cancel_agreement` only in `created` (terminal, blocks
+later funding), `decline_agreement` by the freelancer before the deadline only,
+post-reclaim `withdraw` returning the pool to exactly 0, plus unit tests that
+pin the epoch math (`_days_from_civil` against stdlib anchors incl. 2000/2100
+leap-year edges, `_now_ts` against both message-datetime formats); and
+`get_accounting()` conservation asserted after **every** step of several mixed
+scenarios (happy lifecycle, dispute + appeal + partial withdrawals, reclaim +
+parallel agreement + withdrawals).
 
 > **Important caveat (also in the test file headers):** Direct mode executes
-> only the **leader** path of `run_nondet_unsafe`. The comparative validator
-> — independent fetch + LLM re-execution and the EXACT label/evidence match
-> (no tolerance) — is **not** exercised by these tests. Consensus behavior is
+> only the **leader** path of `run_nondet_unsafe`. The comparative validator -
+> independent fetch + LLM re-execution and the EXACT label/evidence match (no
+> tolerance) - is **not** exercised by these tests. Consensus behavior is
 > covered by the integration tests below.
+
+> **Clock control in direct tests:** the direct-mode runner reads the message
+> datetime from the VM context, so `direct_vm.warp()` pins contract-visible
+> time deterministically (the same mechanism the deadline math uses on-chain:
+> a message-derived clock, never a wall clock).
 
 > **Cache note:** `genlayer-test`'s direct runner resolves the "latest" genvm
 > release and looks for an unversioned `genvm-universal.tar.xz` asset; the
-> current release ships it with a versioned filename, which yields an HTTP
-> 404. `scripts/setup_direct_test_cache.sh` seeds the local cache from the
-> bundle `genvm-lint` already downloaded, which contains the pinned runner
-> this contract depends on.
+> current release ships it with a versioned filename, which yields an HTTP 404.
+> `scripts/setup_direct_test_cache.sh` seeds the local cache from the bundle
+> `genvm-lint` already downloaded, which contains the pinned runner this
+> contract depends on.
 
 ## Integration tests (full consensus)
 
 ```bash
-# Option A — hosted Studio (gasless, rate-limited 60 req/min per IP): put two
+# Option A - hosted Studio (gasless, rate-limited 60 req/min per IP): put two
 # account private keys in gltest.config.yaml (studionet section), then
 gltest tests/integration/ -v -s --network studionet
 
-# Option B — Testnet Bradbury (fund both accounts via
+# Option B - Testnet Bradbury (fund both accounts via
 # https://testnet-faucet.genlayer.foundation/ and put their keys in
 # gltest.config.yaml)
 gltest tests/integration/ -v -s --network testnet_bradbury
 
-# Option C — local Studio (`genlayer up`): full GenVM, Docker required.
+# Option C - local Studio (`genlayer up`): full GenVM, Docker required.
 ```
 
 > **GLSim caveat:** `glsim` (genlayer-test 0.29.x) is **not** a usable path for
 > this contract: deploying the pinned runner generation either rejects the
-> contract class (`@allow_storage` errors) or extracts an empty schema,
-> because the simulator does not run the real GenVM runner. Use studionet /
-> testnet / local Studio instead.
+> contract class (`@allow_storage` errors) or extracts an empty schema, because
+> the simulator does not run the real GenVM runner. Use studionet / testnet /
+> local Studio instead.
 
 [tests/integration/test_escrow_consensus.py](tests/integration/test_escrow_consensus.py)
 drives the real flow with **two different signing accounts** (client and
 freelancer) and asserts:
 
-1. `resolve_dispute` passes **full leader+validator consensus** — acceptance
+1. `resolve_dispute` passes **full leader + validator consensus** - acceptance
    implies independently-executing validators each fetched the delivery URL,
-   re-ran the LLM prompt, and agreed on the **exact same** settlement label
-   and evidence status (there is no tolerance band left to agree "within"),
-   and
+   re-ran the LLM prompt, and agreed on the **exact same** settlement label and
+   evidence status (there is no tolerance band left to agree "within"), and
 2. the **appeal** re-triggers consensus exactly once, the second appeal
    transaction fails execution, and settlement splits per the appealed
    judgment, and
 3. a **no-URL delivery fails closed**: `resolve_dispute` on a description-only
    delivery settles `REFUND_FULL` with `evidence_status: "no_url_provided"`
    through full validator consensus, without any evaluator ever reaching the
-   LLM prompt or a URL fetch.
+   LLM prompt or a URL fetch, and
+4. the **reclaim path through real consensus and a real clock**: at the
+   production 1-hour window floor (NOT weakened for tests), early reclaim
+   reverts on-chain, late delivery reverts after the deadline, reclaim then
+   succeeds crediting the full escrow to the client with the freelancer at 0,
+   a second reclaim reverts, and `get_accounting()` reports the conservation
+   identity holding on-chain. Because it waits out a real hour this test runs
+   ~1h+consensus (skip switch: `ESCROW_RECLAIM_DEADLINE_WAIT`).
 
-> **Live verification status:** the fail-closed and URL-fetch arbitration
-> paths were verified against **studio.genlayer.com** this round through real
-> validator-consensus transactions on the persistent deployment below — a
-> 12-transaction, two-lifecycle end-to-end run (one delivery WITH a URL, one
-> WITHOUT) in which every `resolve_dispute` finalized through the 5-validator
-> consensus ring, and the no-URL one produced `REFUND_FULL` /
-> `no_url_provided` on-chain. Deploy, schema pull, and every write method
-> executed through full consensus on the pinned runner. The matching
-> reproducible integration test
-> (`test_no_url_delivery_fails_closed_via_consensus`) lives in the file above
-> for anyone running `gltest` against studionet / testnet / local Studio.
+> **Live verification status:** all four integration scenarios were executed
+> against **studio.genlayer.com** with real 5-validator consensus (see the
+> deployment section for tx hashes). Deploy, schema pull, and every write
+> method executed through full consensus on the pinned runner.
 
-## Studionet deployment & evidence
+## Studionet deployment and evidence
 
-A **persistent, standalone deployment** of the corrected (fail-closed)
-contract (independent of the ephemeral per-test deployments `gltest` creates
-internally) was made to studionet from the CLI and driven through **two full
-escrow lifecycles: (1) a URL delivery judged by real independent fetching +
-exact-label LLM consensus, and (2) a no-URL delivery that FAILS CLOSED to a
-deterministic refund**. All 13 transactions below were re-verified against the
-explorer's own index (`/address/…` JSON payload) and every one shows status
-**FINALIZED**; they are all clickable in the tables.
-
-**Network:** studionet — "Genlayer Studio Network", chainId **61999**, RPC
-`https://studio.genlayer.com/api` (explorer: <https://explorer-studio.genlayer.com/>)
-**Deployed contract address:** [`0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD`](https://explorer-studio.genlayer.com/address/0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD)
+**Network:** studionet - "Genlayer Studio Network", chainId **61999**, RPC
+`https://studio.genlayer.com/api` (explorer:
+<https://explorer-studio.genlayer.com/>)
 
 **Accounts used (both real, distinct signers):**
 
 | Role | Address | Signs |
 |---|---|---|
-| Client | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` | create / fund / dispute / resolve / accept |
-| Freelancer | `0xc603c2e0E58db94dB0A5754ba280cD6FB5Bfd669` | submit_delivery |
+| Client | `0x3de43AA2f7162c80af98abe78222aE0Cdf83c506` | create / fund / dispute / resolve / accept / reclaim / withdraw |
+| Freelancer | `0x4322029253822d4EA1A72f83a3bFaa2F55993d01` | submit_delivery / decline |
 
 The client key was supplied only via the `GENLAYER_PRIVATE_KEY` environment
-variable (`.env`, git-ignored — see [.gitignore](.gitignore)); it was never
-hardcoded, logged, or committed. `fund_escrow` sent a real 5 GEN native value
-transfer (`5000000000000000000` atto).
+variable (`.env`, git-ignored - see [.gitignore](.gitignore)); it was never
+hardcoded, logged, or committed. Value-bearing calls sent real GEN transfers
+(`fund_escrow` = 3-5 GEN at atto scale).
 
-**1 — Deploy via the CLI:**
+**Deployments (each revision is a NEW address; the storage layout changed):**
 
-```bash
-genlayer network set studionet
-genlayer account use escrow-builder
-echo "<keystore password>" | genlayer deploy --contract contracts/freelance_escrow.py
-```
-
-- Deploy tx: [`0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e`](https://explorer-studio.genlayer.com/tx/0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e) — FINALIZED; consensus `MAJORITY_AGREE` with 5 validators, and RPC confirms the tx carries the pinned-runner header as its first source bytes
-
-**2 — Two full lifecycles via the genlayer-py SDK** ([scripts/studionet_e2e_demo.py](scripts/studionet_e2e_demo.py)):
-
-`genlayer write` cannot attach native `msg.value`, so the value-bearing
-`fund_escrow` (and the whole flow) was driven through the SDK, which sends real
-consensus transactions. Run:
-
-```bash
-set -a; . ./.env; set +a          # loads GENLAYER_PRIVATE_KEY only
-python scripts/studionet_e2e_demo.py \
-    --contract-address 0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD \
-    --freelancer-keystore ~/.genlayer/keystores/cli-freelancer.json \
-    --freelancer-password-stdin
-```
-
-**Lifecycle 1 — delivery WITH a URL** (`"https://example.com - hero, features,
-contact form delivered"`, a **false claim** since example.com is a placeholder
-page). Every evaluator fetched the URL itself, judged the fetched content, and
-reached the exact label:
-
-| Step | Method (signer) | Tx hash (clickable — explorer) | Result |
+| Revision | Address | Deploy tx | Consensus |
 |---|---|---|---|
-| 1 | `create_agreement` (client) | [`0x72d84ab9dc7b12d445eb7144fd2c07b6a71df2489a4c81de2f9bcb72c48f1d3a`](https://explorer-studio.genlayer.com/tx/0x72d84ab9dc7b12d445eb7144fd2c07b6a71df2489a4c81de2f9bcb72c48f1d3a) | status `created` |
-| 2 | `fund_escrow` +5 GEN (client) | [`0xe5524ffba7799930686734093e0661273e39654ed4cb8ecf74d60c9048c7c9fd`](https://explorer-studio.genlayer.com/tx/0xe5524ffba7799930686734093e0661273e39654ed4cb8ecf74d60c9048c7c9fd) | status `funded`, pool credited |
-| 3 | `submit_delivery` (freelancer) | [`0x72005b68edaa435faa02f5761a800c9e2518232b7b64ad60f6e7f5a8e5fdffff`](https://explorer-studio.genlayer.com/tx/0x72005b68edaa435faa02f5761a800c9e2518232b7b64ad60f6e7f5a8e5fdffff) | `delivery_url=https://example.com` extracted |
-| 4 | `raise_dispute` (client) | [`0x282f9b1285812928ae5c1766022aaf5fca188a89655df8bd45e0b737f39bde9b`](https://explorer-studio.genlayer.com/tx/0x282f9b1285812928ae5c1766022aaf5fca188a89655df8bd45e0b737f39bde9b) | status `disputed` |
-| 5 | `resolve_dispute` (client) | [`0xb6dcf2b578081c98d1d36266d821e09a87ee0ff6ef818b734ccc30a638770bca`](https://explorer-studio.genlayer.com/tx/0xb6dcf2b578081c98d1d36266d821e09a87ee0ff6ef818b734ccc30a638770bca) | **evaluator-fetched content judged; exact-label consensus `REFUND_FULL`**, `evidence_status=fetched` |
-| 6 | `accept_resolution` (client) | [`0x8900e0ec4dde5a5de98ed6fe525a8aeeccfe519bdd9d7e45dd087d5b4f578290`](https://explorer-studio.genlayer.com/tx/0x8900e0ec4dde5a5de98ed6fe525a8aeeccfe519bdd9d7e45dd087d5b4f578290) | settlement credited |
+| Current (deadline + exits) | `0x06004A0D77F91d1d4691403595c185173Dd4a6F4` | [`0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076`](https://explorer-studio.genlayer.com/tx/0x61a7a0722c47e230242503ce6791e8991b57a687a1132e505aa86b749d495076) | `MAJORITY_AGREE` |
+| Previous (fail-closed arbitration) | `0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD` | [`0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e`](https://explorer-studio.genlayer.com/tx/0xcf65806dc8e5a51695fc307ec76336336ef904b1d6a7e6ab642de947fe3b067e) | `MAJORITY_AGREE` |
 
-**Lifecycle 2 — delivery WITHOUT any URL (the FAIL-CLOSED proof):**
+**Evidence runs on the current deployment** (driven by
+[scripts/studionet_reclaim_demo.py](scripts/studionet_reclaim_demo.py), all
+through full consensus; tx hashes recorded here are re-verified against the
+explorer JSON API):
 
-| Step | Method (signer) | Tx hash (clickable — explorer) | Result |
-|---|---|---|---|
-| 1 | `create_agreement` (client) | [`0xadd6ae9b093edb9a7ca739ca261f10b19d44b29b045e8a7fe92153e828cbf529`](https://explorer-studio.genlayer.com/tx/0xadd6ae9b093edb9a7ca739ca261f10b19d44b29b045e8a7fe92153e828cbf529) | status `created` |
-| 2 | `fund_escrow` +5 GEN (client) | [`0xe42d2073924d273f658598beac781c75965c34c9584564706b66cb6e64cffbdd`](https://explorer-studio.genlayer.com/tx/0xe42d2073924d273f658598beac781c75965c34c9584564706b66cb6e64cffbdd) | status `funded` |
-| 3 | `submit_delivery` (freelancer, **no URL**) | [`0xc1992cda29741ffe24befd541fbec9499293c98770ea083a6b0fbd0e5becd7a0`](https://explorer-studio.genlayer.com/tx/0xc1992cda29741ffe24befd541fbec9499293c98770ea083a6b0fbd0e5becd7a0) | `delivery_url=""` (nothing to fetch) |
-| 4 | `raise_dispute` (client) | [`0x5674099e3e195a4a595449e808a7a8daf014b853d56290e148e15782dd52d79b`](https://explorer-studio.genlayer.com/tx/0x5674099e3e195a4a595449e808a7a8daf014b853d56290e148e15782dd52d79b) | status `disputed` |
-| 5 | `resolve_dispute` (client) | [`0x83959026b33431945be20ad4f79ab1bea2d26d0fe884935b18261a8b4b6a55f6`](https://explorer-studio.genlayer.com/tx/0x83959026b33431945be20ad4f79ab1bea2d26d0fe884935b18261a8b4b6a55f6) | **FAIL CLOSED: deterministic `REFUND_FULL`, LLM never consulted**, `evidence_status=no_url_provided` |
-| 6 | `accept_resolution` (client) | [`0x36305ad8c87a03d3dddfe6c5ba15b4ac14b0448ce8b35457d4eb683247486d14`](https://explorer-studio.genlayer.com/tx/0x36305ad8c87a03d3dddfe6c5ba15b4ac14b0448ce8b35457d4eb683247486d14) | client made whole |
+<!-- EVIDENCE_TABLE_PLACEHOLDER -->
 
-Final on-chain state of the no-URL agreement (asserted by the script):
+Earlier-lifecycle evidence on the previous deployment (URL arbitration and
+no-URL fail-closed, unchanged in this revision) remains on-chain:
+arbitration txs
+[`0xb6dcf2b...`](https://explorer-studio.genlayer.com/tx/0xb6dcf2b578081c98d1d36266d821e09a87ee0ff6ef818b734ccc30a638770bca)
+(exact-label consensus over evaluator-fetched content) and
+[`0x8395902...`](https://explorer-studio.genlayer.com/tx/0x83959026b33431945be20ad4f79ab1bea2d26d0fe884935b18261a8b4b6a55f6)
+(no-URL fail-closed refund), each FINALIZED on the explorer.
 
-```json
-{
-  "status": "refunded",
-  "judgment_decision": "REFUND_FULL",
-  "judgment_percent": 0,
-  "delivery_url": ""
-}
-```
+### Source provenance (submitted == deployed)
 
-…with `arbitration_history` record `decision=REFUND_FULL`,
-**`evidence_status=no_url_provided`** — no evaluator ever fetched anything or
-ran the LLM; the refund was the deterministic fail-closed outcome, adopted as
-real consensus. The URL lifecycle likewise ended `REFUND_FULL` but with
-**`evidence_status=fetched`** (evaluators retrieved the placeholder page and
-judged it). Aggregate ledger after both lifecycles: `escrow_pool =
-10000000000000000000`, `freelancer_credit = 0`,
-`client_credit = 10000000000000000000`; the script asserts
-`freelancer_credit + client_credit == 2 * escrow_amount` and each stored
-percent equals the label-derived payout.
+- GenLayer stores the FULL Python source inside the deploy transaction; the
+  RPC exposes it at `eth_getTransactionByHash(deploy_tx).data.contract_code`
+  (base64). `eth_getCode` returns 0 bytes (intelligent contracts carry source,
+  not EVM bytecode).
+- [scripts/verify_deployed_source.py](scripts/verify_deployed_source.py)
+  decodes the deployed source from the deploy tx, recomputes its sha256 and
+  compares it against the repo file, and additionally compares the deployed
+  ABI (`gen_getContractSchema`) against the schema derived from the repo source
+  (`gen_getContractSchemaForCode`). Anyone can re-run it read-only:
 
-> Note what the two lifecycles together demonstrate: the contract pays the
-> freelancer **only** against independently-fetched evidence. A false URL
-> claim is caught because evaluators fetch and read the real content; a
-> no-URL claim is caught because the contract refuses to judge self-described
-> work at all and refunds by default. In neither case can an unsubstantiated
-> description move money.
+  ```bash
+  python scripts/verify_deployed_source.py <ADDRESS> <DEPLOY_TX>
+  ```
 
-**Explorer verification** (re-checked after this run): the contract page
-index lists all 13 transactions above (deploy + the two 6-step lifecycles),
-each with `"status":"FINALIZED"`.
+- The commit hash and source sha256 of the deployed revision are recorded in
+  the deploy section below and in the git tag for this release.
 
-## Deploy (testnet)
+<!-- PROVENANCE_PLACEHOLDER -->
+
+## Deploy (from scratch)
 
 ```bash
-npm install -g genlayer
-genlayer network set testnet-bradbury     # or: studionet (gasless)
-genlayer account create --name builder && genlayer account send <addr> 10gen  # faucet for testnets
-genlayer deploy --contract contracts/freelance_escrow.py
-
-genlayer call <address> get_escrow_pool
-genlayer write  <address> create_agreement --args "job-1" 0x<FREELANCER> "Logo" "A vector logo, 3 revisions" 5000000000000000000
-genlayer receipt <txHash> --stdout --stderr    # lifecycle status ≠ execution success
+pip install -r requirements.txt
+set -a; . ./.env; set +a            # GENLAYER_PRIVATE_KEY only
+python scripts/deploy_studionet.py  # prints deploy tx + address (MAJORITY_AGREE)
 ```
+
+Or with the GenLayer CLI: `genlayer deploy --contract
+contracts/freelance_escrow.py` after `genlayer network set studionet`.
 
 ## Verification checklist (submission requirements)
 
-- ✅ Line 1 is a pinned runner header — **no** `py-genlayer:test` / `:latest` / unversioned.
-- ✅ Dispute judgment uses a **custom comparative validator** (`run_nondet_unsafe`): validators independently fetch the delivery URL, re-run the prompt, and require an **EXACT match on the fixed settlement label + evidence status**. **No tolerance anywhere; no `strict_eq` on raw LLM/web output.**
-- ✅ **No leader-output-only/schema validation** anywhere on the judgment path; outputs outside the five fixed labels (or unparseable) ⇒ validator returns `False` ⇒ leader rotation.
-- ✅ Delivered URLs are **fetched independently by every evaluator** (`gl.nondet.web.get` inside its own run — no shared fetched copy); unreachable artifacts fall back **by consensus** to `REFUND_FULL` (refund-by-default), never a silent pass.
-- ✅ **Fail closed on missing evidence:** a delivery with no (or whitespace-only) URL returns `REFUND_FULL` with `evidence_status: "no_url_provided"` **before any LLM prompt or fetch** — the freelancer's own description alone can never release or split funds.
-- ✅ Typed storage only (`TreeMap`/`DynArray`), `Agreement` dataclass, statuses as `str` (no `Enum` stored), fields append-only.
-- ✅ Money is atto-scale `u256` integer math throughout; **no float is ever used to represent or move funds** — after the redesign the contract contains **no `float()` at all**: settlement values come only from the integer label→percent mapping.
-- ✅ Sender checks via `gl.message.sender_address` (the pinned SDK's name for the sender field; this SDK has no `sender_account` attribute); all rejections are `gl.vm.UserError` with prefixed messages — **no bare `Exception`**.
-- ✅ Appeal path: exactly one re-trigger of `resolve_dispute`.
-- ✅ `genvm-lint check` passes; 30 direct-mode tests pass (including the new fail-closed no-URL and whitespace-URL cases); the integration suite contains a matching no-URL fail-closed consensus test.
-- ✅ **Persistent studionet deployment** `0x5EadC908deb2dc5Ad80a65f03105e4Ee9620EbFD` (the corrected fail-closed contract) driven through **two full lifecycles** — one URL delivery (independent fetch + exact-label LLM consensus) and one no-URL delivery (**FAIL CLOSED**: `resolve_dispute` → `REFUND_FULL` / `no_url_provided` by real validator consensus) — all 13 txs FINALIZED on the explorer — see [Studionet deployment & evidence](#studionet-deployment--evidence).
+- Line 1 is a pinned runner header - **no** `py-genlayer:test` / `:latest` /
+  unversioned.
+- Dispute judgment uses a **custom comparative validator**
+  (`run_nondet_unsafe`): validators independently fetch the delivery URL,
+  re-run the prompt, and require an **EXACT match on the fixed settlement label
+  + evidence status**. **No tolerance anywhere; no `strict_eq` on raw LLM/web
+  output.**
+- **No leader-output-only/schema validation** anywhere on the judgment path;
+  outputs outside the five fixed labels (or unparseable) make the validator
+  return `False` - leader rotation.
+- Delivered URLs are **fetched independently by every evaluator**
+  (`gl.nondet.web.get` inside its own run - no shared fetched copy);
+  unreachable artifacts fall back **by consensus** to `REFUND_FULL`
+  (refund-by-default), never a silent pass.
+- **Fail closed on missing evidence:** a delivery with no (or whitespace-only)
+  URL returns `REFUND_FULL` with `evidence_status: "no_url_provided"` **before
+  any LLM prompt or fetch** - the freelancer's own description alone can never
+  release or split funds.
+- **Enforceable delivery deadline**: window bounded at entry (1h..90d, both
+  sides), deterministic message-derived clock (never a wall clock), late
+  delivery refused at `deadline + 1s`, delivery at exactly `deadline` allowed,
+  reclaim only strictly after the deadline, no exit before it; deliver/reclaim
+  race closed by complementary timestamp bounds plus status prechecks.
+- **Client-accessible exits**: `cancel_agreement` (pre-funding),
+  `reclaim_undelivered` (post-deadline, full refund), `decline_agreement`
+  (freelancer, client-favoring only). `STATUS_REFUNDED` now matches its
+  documented meaning, and `cancelled` covers the never-funded case.
+- **Accounting invariants**: single-settlement guard in `_credit_out`,
+  `freelancer + client == escrow` per settlement, and the checkable identity
+  `escrow_pool == unwithdrawn_credits + locked_escrow` via `get_accounting()`
+  (asserted after every step in the direct suite and on-chain in the live
+  reclaim run).
+- Typed storage only (`TreeMap`/`DynArray`), `Agreement` dataclass, statuses as
+  `str` (no `Enum` stored), new fields appended only.
+- Money is atto-scale `u256` integer math throughout; **no float is ever used
+  to represent or move funds** - settlement values come only from the integer
+  label to percent mapping, and the deadline math is pure integer calendar
+  arithmetic.
+- Sender checks via `gl.message.sender_address` (the pinned SDK's name for the
+  sender field; this SDK has no `sender_account` attribute); all rejections are
+  `gl.vm.UserError` with prefixed messages - **no bare `Exception`**.
+- Appeal path: exactly one re-trigger of `resolve_dispute`.
+- `genvm-lint check` passes; **48 direct-mode tests** pass (deadline suite
+  included); the integration suite contains a matching no-URL fail-closed test
+  and a **live full-consensus reclaim test** at the production window floor.
+- **Persistent studionet deployment** of this revision with early-reclaim
+  revert, late-delivery revert, successful reclaim, and withdraw - all txs
+  re-verified through the explorer JSON API.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

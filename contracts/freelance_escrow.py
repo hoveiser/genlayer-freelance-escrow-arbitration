@@ -13,6 +13,17 @@ answer. A delivery WITHOUT an externally fetchable URL FAILS CLOSED: no LLM is
 consulted and the escrow is refunded in full, so a self-described deliverable
 can never move money.
 
+DELIVERY DEADLINE (reviewer-driven): every agreement carries a
+`delivery_window_seconds` bounded at creation (floor 1 hour, ceiling 90 days).
+Funding starts the clock (`delivery_deadline_ts`). The freelancer can only
+deliver at or before the deadline; once the deadline has STRICTLY passed
+without a delivery, the client can call `reclaim_undelivered` to recover the
+FULL escrow. The two transitions are mutually exclusive by timestamp
+(<= versus > the same on-chain `delivery_deadline_ts`) and by status, so no
+race can double-release funds. The client can also `cancel_agreement` before
+funding (no funds exist yet) and the freelancer can `decline_agreement` after
+funding and before the deadline (a client-favoring refund only).
+
 Settlement outcomes form a small FIXED label set (RELEASE_FULL / REFUND_FULL /
 SPLIT_QUARTER / SPLIT_HALF / SPLIT_THREE_QUARTER). Because the chosen label
 DIRECTLY determines each party's native-token transfer, validators must agree
@@ -60,10 +71,41 @@ STATUS_DISPUTED = "disputed"      # a party raised a dispute, awaiting arbitrati
 STATUS_ARBITRATED = "arbitrated"  # LLM consensus judgment recorded, awaiting settlement/appeal
 STATUS_SETTLED = "settled"        # payout computed & credited, awaiting withdrawal
 STATUS_RELEASED = "released"      # client approved delivery - full release, no arbitration
-STATUS_REFUNDED = "refunded"      # client never funded / cancelled before funding - no funds moved
+STATUS_REFUNDED = "refunded"      # funds were credited back to the client (reclaim, decline, or refund verdict)
+STATUS_CANCELLED = "cancelled"    # client cancelled a never-funded agreement - no funds ever moved
+
+# Statuses from which NO further settlement may ever start: each has already
+# credited its escrow (settled/released/refunded - the per-agreement credit
+# fields are non-zero from then on for life) or moved it out of reach
+# (cancelled, never funded). "delivered"/"disputed"/"arbitrated" are NOT
+# here: they are pre-credit interim states that legitimately lead into
+# _credit_out. Used by the double-settlement guard and the get_accounting
+# view.
+FINAL_STATUSES = (STATUS_SETTLED, STATUS_RELEASED, STATUS_REFUNDED,
+                  STATUS_CANCELLED)
+
+# Statuses whose escrow is money ACTUALLY HELD by the contract and not yet
+# credited: funded and every pre-settlement state that follows it
+# (delivered/disputed/arbitrated). A created agreement holds no funds and is
+# NOT locked; settled/released/refunded money already left "locked" and
+# appeared in "unwithdrawn credits" within the SAME transaction, so the
+# conservation identity escrow_pool == unwithdrawn + locked never sees a gap.
+LOCKED_STATUSES = (STATUS_FUNDED, STATUS_DELIVERED,
+                   STATUS_DISPUTED, STATUS_ARBITRATED)
 
 # Maximum number of re-arbitrations (appeals) allowed per agreement.
 MAX_APPEALS = 1
+
+# ---------------------------------------------------------------------------
+# Delivery window bounds - enforced at create_agreement time.
+# A deadline shorter than 1 hour is unusable in practice (network latency and
+# consensus time already eat minutes); a deadline longer than 90 days leaves
+# client funds locked with no exit for too long. Both bounds are checked at
+# ENTRY so no adversarial client can craft a degenerate window: a 0-second
+# window would let the client reclaim the escrow moments after funding it.
+# ---------------------------------------------------------------------------
+MIN_DELIVERY_WINDOW_SECONDS = 60 * 60          # 1 hour
+MAX_DELIVERY_WINDOW_SECONDS = 90 * 24 * 60 * 60  # 90 days
 
 # ---------------------------------------------------------------------------
 # Settlement outcomes - a small FIXED, enumerable label set.
@@ -167,6 +209,10 @@ class Agreement:
     delivery_url: str            # externally-hosted evidence URL extracted from
                                  # delivered_work at submission time ("" if none).
                                  # APPENDED at the end per the layout rule above.
+    delivery_window_seconds: u256  # agreed delivery window, bounded at creation
+                                 # (MIN/MAX_DELIVERY_WINDOW_SECONDS). APPENDED.
+    delivery_deadline_ts: u256   # unix seconds after which delivery is refused
+                                 # and reclaim unlocks; 0 until funded. APPENDED.
 
 
 def _account_key(account) -> str:
@@ -190,6 +236,93 @@ def _now_iso() -> str:
     (This runner exposes no other deterministic time source.)
     """
     return str(gl.message_raw["datetime"])
+
+
+def _is_leap(y: int) -> bool:
+    """Gregorian leap-year rule, plain integers only. Kept as an explicit,
+    independently-tested building block for the calendar reasoning above."""
+    return (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+
+
+def _days_from_civil(y: int, m: int, d: int) -> int:
+    """Days between (y, m, d) and 1970-01-01, Howard Hinnant's civil algorithm
+    (https://howardhinnant.github.io/date_algorithms.html), transcribed to
+    pure Python integer arithmetic - no floats, no imports - so the result is
+    bit-identical on every validator. Verified against known epoch anchors
+    INCLUDING century leap-year edges (see tests/direct/test_escrow_direct.py).
+    The era division is written as TRUNCATION (C++ semantics of the original
+    algorithm): Python's // floors toward negative infinity and would shift
+    negative-era results by a full 400-year cycle. Message datetimes are far
+    past year 400 anyway, but the helper must be exactly right wherever it is
+    used.
+    """
+    yy = y
+    if m <= 2:
+        yy = yy - 1                          # year starts at March
+    if yy >= 0:
+        era = yy // 400
+    else:
+        era = -((-yy) // 400)                # truncation, not floor
+    yoe = yy - era * 400                     # [0, 399]
+    mp = m + (-3 if m > 2 else 9)            # Mar=0 ... Feb=11
+    doy = (153 * mp + 2) // 5 + d - 1        # [0, 365]
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy  # [0, 146096]
+    return era * 146097 + doe - 719468
+
+
+def _now_ts() -> int:
+    """Deterministic unix epoch seconds of the current consensus message.
+
+    DERIVED, NOT PARSED WITH A LIBRARY: the message datetime is an ISO-8601
+    UTC string (e.g. "2026-10-02T20:36:20.144555+00:00" or the Z form). Only
+    plain str operations and integer math are used - no datetime module, no
+    regex, no float - because the value must be computed IDENTICALLY by the
+    leader and every validator from the same consensus-signed message, and
+    the runner's stdlib availability cannot be assumed. The real runtime
+    format was verified against live studionet receipts (see README).
+    """
+    s = str(gl.message_raw["datetime"])
+    # Strip a TRAILING Z (UTC marker) only - never replace("Z", ""), because
+    # a blind replace would also delete any 'Z' inside the date portion and
+    # corrupt the parse; only the final character is the timezone designator.
+    if s and s[-1] == "Z":
+        s = s[:-1]
+    sep = s.find("T")
+    if sep == -1:
+        sep = s.find(" ")
+    if sep == -1:
+        raise gl.vm.UserError(f"{ERROR_EXPECTED} unparseable message datetime")
+    date_part = s[:sep]
+    time_part = s[sep + 1:]
+    # Drop any timezone suffix (+00:00 / -05:00 etc.); the message datetime
+    # is UTC by convention, both on the network and in the direct-mode VM.
+    # The scan starts at index 1 so a leading sign is never mistaken for an
+    # offset marker.
+    for i in range(1, len(time_part)):
+        ch = time_part[i]
+        if ch == "+" or ch == "-":
+            time_part = time_part[:i]
+            break
+    # Truncate fractional seconds - sub-second precision must never change a
+    # deadline comparison outcome, and dropping it keeps every validator in
+    # exact agreement even if the rendered string differs past the dot.
+    dot = time_part.find(".")
+    if dot != -1:
+        time_part = time_part[:dot]
+    date_fields = date_part.split("-")
+    time_fields = time_part.split(":")
+    if len(date_fields) != 3 or len(time_fields) < 2:
+        raise gl.vm.UserError(f"{ERROR_EXPECTED} unparseable message datetime")
+    y = int(date_fields[0])
+    mo = int(date_fields[1])
+    d = int(date_fields[2])
+    h = int(time_fields[0])
+    mi = int(time_fields[1])
+    sec = 0
+    if len(time_fields) >= 3:
+        sec = int(time_fields[2])
+    days = _days_from_civil(y, mo, d)
+    return days * 86400 + h * 3600 + mi * 60 + sec
 
 
 def _extract_delivery_url(delivered_work: str) -> str:
@@ -453,8 +586,16 @@ class FreelanceEscrow(gl.Contract):
 
     @gl.public.write
     def create_agreement(self, agreement_id: str, freelancer: Address, title: str,
-                         spec: str, escrow_amount_atto: u256) -> None:
-        """Draft an agreement. The caller becomes the client."""
+                         spec: str, escrow_amount_atto: u256,
+                         delivery_window_seconds: u256) -> None:
+        """Draft an agreement. The caller becomes the client.
+
+        `delivery_window_seconds` is validated at ENTRY against both a floor
+        and a ceiling: an adversarial client must not be able to craft a
+        near-zero window (reclaim the escrow moments after funding) nor an
+        absurd one (the bound is the client's own protection too - it is
+        what makes the deadline a real, checkable contract term).
+        """
         if agreement_id == "":
             raise gl.vm.UserError("ESCROW: agreement_id must not be empty")
         if agreement_id in self.agreements:
@@ -465,6 +606,16 @@ class FreelanceEscrow(gl.Contract):
             raise gl.vm.UserError("ESCROW: title must not be empty")
         if escrow_amount_atto <= 0:
             raise gl.vm.UserError("ESCROW: escrow_amount_atto must be positive")
+        if delivery_window_seconds < MIN_DELIVERY_WINDOW_SECONDS:
+            raise gl.vm.UserError(
+                f"ESCROW: delivery_window_seconds below floor "
+                f"({MIN_DELIVERY_WINDOW_SECONDS}s = 1 hour)"
+            )
+        if delivery_window_seconds > MAX_DELIVERY_WINDOW_SECONDS:
+            raise gl.vm.UserError(
+                f"ESCROW: delivery_window_seconds above ceiling "
+                f"({MAX_DELIVERY_WINDOW_SECONDS}s = 90 days)"
+            )
         if not isinstance(freelancer, Address):
             freelancer = Address(freelancer)
         if freelancer == gl.message.sender_address:
@@ -494,6 +645,8 @@ class FreelanceEscrow(gl.Contract):
             client_credit_atto=0,
             freelancer_credit_atto=0,
             delivery_url="",
+            delivery_window_seconds=delivery_window_seconds,
+            delivery_deadline_ts=0,
         )
         self.agreement_ids.append(agreement_id)
 
@@ -520,6 +673,11 @@ class FreelanceEscrow(gl.Contract):
 
         ag.status = STATUS_FUNDED
         ag.funded_at = _now_iso()
+        # The clock starts at FUND time, not creation: the freelancer is only
+        # bound once real money is actually escrowed. _now_ts() is derived
+        # from the consensus-signed message, so every validator computes the
+        # identical deadline.
+        ag.delivery_deadline_ts = _now_ts() + ag.delivery_window_seconds
         self.escrow_pool_atto = self.escrow_pool_atto + ag.escrow_atto
         self.agreements[agreement_id] = ag
 
@@ -538,6 +696,14 @@ class FreelanceEscrow(gl.Contract):
             raise gl.vm.UserError(f"ESCROW: cannot deliver in status '{ag.status}'")
         if delivered_work == "":
             raise gl.vm.UserError("ESCROW: delivered_work must not be empty")
+        # Deadline ceiling: delivery at EXACTLY the deadline timestamp is still
+        # valid (<=); one second late is refused. This boundary is the exact
+        # complement of reclaim_undelivered's (ts > deadline), see the race
+        # analysis there.
+        if _now_ts() > ag.delivery_deadline_ts:
+            raise gl.vm.UserError(
+                "ESCROW: delivery deadline expired; late submissions are refused"
+            )
 
         ag.delivered_work = delivered_work
         ag.delivery_url = _extract_delivery_url(delivered_work)
@@ -558,13 +724,127 @@ class FreelanceEscrow(gl.Contract):
         ag.judgment_percent = 100
         ag.judgment_analysis = "Client approved delivery off-chain; no arbitration."
         ag.resolved_at = _now_iso()
+        # Persist first: _credit_out re-reads the stored record (see its
+        # double-settlement guard), so the judgment fields must be on-chain.
         self.agreements[agreement_id] = ag
         self._credit_out(agreement_id, ag, 100)
         # _credit_out already persists with status STATUS_RELEASED.
 
     @gl.public.write
+    def cancel_agreement(self, agreement_id: str) -> None:
+        """Client cancels a NEVER-FUNDED agreement. No funds can move because
+        none were ever deposited; the status simply becomes "cancelled".
+        (STATUS_REFUNDED is deliberately NOT reused here: cancelled means no
+        funds ever existed, refunded means money actually flowed back.)
+        """
+        ag = self._get(agreement_id)
+        if gl.message.sender_address != ag.client:
+            raise gl.vm.UserError("ESCROW: only the client can cancel")
+        if ag.status != STATUS_CREATED:
+            raise gl.vm.UserError(
+                f"ESCROW: can only cancel before funding, not in status '{ag.status}'"
+            )
+        ag.status = STATUS_CANCELLED
+        ag.resolved_at = _now_iso()
+        self.agreements[agreement_id] = ag
+
+    @gl.public.write
+    def decline_agreement(self, agreement_id: str) -> None:
+        """Freelancer walks away from a funded agreement before the deadline.
+
+        The FULL escrow is credited back to the client. This path can only
+        EVER favor the client (the freelancer gives up everything), so an
+        adversarial freelancer cannot use it to extract funds. Allowed only
+        while the delivery window is still open (ts <= deadline), keeping the
+        timeline semantics clean: before the deadline either party can still
+        act, after it the client's reclaim path is the defined exit.
+        """
+        ag = self._get(agreement_id)
+        if gl.message.sender_address != ag.freelancer:
+            raise gl.vm.UserError("ESCROW: only the freelancer can decline")
+        if ag.status != STATUS_FUNDED:
+            raise gl.vm.UserError(f"ESCROW: cannot decline in status '{ag.status}'")
+        if _now_ts() > ag.delivery_deadline_ts:
+            raise gl.vm.UserError(
+                "ESCROW: delivery deadline already expired; only the client "
+                "can exit via reclaim_undelivered"
+            )
+        ag.judgment_decision = DECISION_REFUND_FULL
+        ag.judgment_percent = 0
+        ag.judgment_analysis = (
+            "Freelancer declined the assignment before the delivery deadline; "
+            "the full escrow was refunded to the client."
+        )
+        ag.arbitration_nonce = ag.arbitration_nonce + 1
+        ag.arbitration_history.append(json.dumps({
+            "nonce": ag.arbitration_nonce,
+            "decision": DECISION_REFUND_FULL,
+            "percent": 0,
+            "evidence_status": "not_applicable",
+            "analysis": ag.judgment_analysis,
+            "at": _now_iso(),
+        }))
+        # _credit_out re-reads the persisted record, so the judgment fields
+        # must be written back first for them to appear in the settlement.
+        self.agreements[agreement_id] = ag
+        self._credit_out(agreement_id, ag, 0)
+
+    @gl.public.write
+    def reclaim_undelivered(self, agreement_id: str) -> None:
+        """Client recovers the FULL escrow when the deadline passed with no
+        delivery. This is the enforceable exit that makes an enforceable
+        deadline: without it, escrow could still be locked forever.
+
+        RACE ANALYSIS (deadline boundary vs submit_delivery):
+        - submit_delivery requires `_now_ts() <= delivery_deadline_ts`.
+        - reclaim_undelivered requires `_now_ts() > delivery_deadline_ts`.
+        The two conditions are exact complements over the SAME stored integer
+        and the SAME deterministic message-clock, so no transaction can
+        satisfy both. Within one block the VM orders transactions serially:
+        whichever lands first moves the status out of "funded", and the other
+        is then refused by its status precheck (delivered vs funded) on top of
+        the timestamp guard. Double release is therefore impossible by BOTH
+        timestamp and status, not by either alone.
+        Strict-greater (not >=) is deliberate: the deadline second itself
+        belongs to the freelancer's delivery window, reclaim starts one tick
+        later - no overlap and no one-second gap either.
+        """
+        ag = self._get(agreement_id)
+        if gl.message.sender_address != ag.client:
+            raise gl.vm.UserError("ESCROW: only the client can reclaim undelivered escrow")
+        if ag.status != STATUS_FUNDED:
+            raise gl.vm.UserError(
+                f"ESCROW: reclaim only exists for funded-but-undelivered "
+                f"agreements, not status '{ag.status}'"
+            )
+        if _now_ts() <= ag.delivery_deadline_ts:
+            raise gl.vm.UserError(
+                "ESCROW: delivery deadline not yet reached; early recovery "
+                "is not allowed"
+            )
+        ag.judgment_decision = DECISION_REFUND_FULL
+        ag.judgment_percent = 0
+        ag.judgment_analysis = (
+            "deadline expired without delivery; the full escrow was "
+            "reclaimed by the client."
+        )
+        ag.arbitration_nonce = ag.arbitration_nonce + 1
+        ag.arbitration_history.append(json.dumps({
+            "nonce": ag.arbitration_nonce,
+            "decision": DECISION_REFUND_FULL,
+            "percent": 0,
+            "evidence_status": "not_applicable",
+            "analysis": ag.judgment_analysis,
+            "at": _now_iso(),
+        }))
+        # Persist the history/analysis before settlement; _credit_out
+        # re-reads the stored record and flips status to "refunded".
+        self.agreements[agreement_id] = ag
+        self._credit_out(agreement_id, ag, 0)
+
+    @gl.public.write
     def raise_dispute(self, agreement_id: str, reason: str) -> None:
-        """Either party can contest a delivered (or stalled) outcome."""
+        """Either party can contest a delivered outcome."""
         ag = self._get(agreement_id)
         sender = gl.message.sender_address
         if sender != ag.client and sender != ag.freelancer:
@@ -705,7 +985,33 @@ class FreelanceEscrow(gl.Contract):
         self._credit_out(agreement_id, ag, ag.judgment_percent)
 
     def _credit_out(self, agreement_id: str, ag: Agreement, percent: u256) -> None:
-        """Split escrow by freelancer `percent` and credit both ledgers."""
+        """Split escrow by freelancer `percent` and credit both ledgers.
+
+        DOUBLE-SETTLEMENT GUARD (all-or-nothing credit invariant): a credited
+        agreement must have had ZERO credits recorded before this call and
+        must not already be in a final status. Once any settlement ran, the
+        per-agreement credit fields stay non-zero for the agreement's whole
+        life (they are only cleared from the account ledger at withdraw), so
+        a second _credit_out on the same agreement can never pass - reclaim,
+        decline, approve and accept_resolution are mutually exclusive even
+        against a directly forged second call.
+
+        NOTE: this re-reads the agreement from storage (`self._get`) because
+        a caller that mutated its local copy without persisting it first
+        would otherwise settle stale data; callers persist explicitly before
+        delegating when they intend their updates to settle.
+        """
+        ag = self._get(agreement_id)
+        if ag.client_credit_atto + ag.freelancer_credit_atto > 0:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} agreement '{agreement_id}' was already "
+                "credited once; double settlement is impossible"
+            )
+        if ag.status in FINAL_STATUSES:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} cannot settle an agreement in final "
+                f"status '{ag.status}'"
+            )
         freelancer_atto = ag.escrow_atto * percent // 100
         client_atto = ag.escrow_atto - freelancer_atto
         ag.client_credit_atto = ag.client_credit_atto + client_atto
@@ -791,6 +1097,8 @@ class FreelanceEscrow(gl.Contract):
             "appeal_count": ag.appeal_count,
             "arbitration_nonce": ag.arbitration_nonce,
             "arbitration_history": list(ag.arbitration_history),
+            "delivery_window_seconds": ag.delivery_window_seconds,
+            "delivery_deadline_ts": ag.delivery_deadline_ts,
         }
 
     @gl.public.view
@@ -807,3 +1115,35 @@ class FreelanceEscrow(gl.Contract):
     @gl.public.view
     def get_escrow_pool(self) -> int:
         return self.escrow_pool_atto
+
+    @gl.public.view
+    def get_accounting(self) -> dict:
+        """The three sides of the escrow conservation invariant.
+
+        While accounting is consistent, the identity
+
+            escrow_pool_atto == unwithdrawn_credits_atto + locked_escrow_atto
+
+        must hold after EVERY state transition: funded-but-unsettled
+        agreements (created/funded hold their deposit in the pool = locked
+        escrow), settled agreements hold their payout in the credit ledger
+        (= unwithdrawn) until withdraw() moves both down together. A break in
+        the identity means funds were created, destroyed, or double-credited.
+        """
+        unwithdrawn = 0
+        for entry in self.withdrawable_atto.values():
+            unwithdrawn = unwithdrawn + entry
+        locked = 0
+        for aid in self.agreement_ids:
+            ag = self.agreements[aid]
+            if ag.status in LOCKED_STATUSES:
+                # funded/delivered/disputed/arbitrated: the deposit sits in
+                # the pool untouched. A created agreement holds no money and
+                # is deliberately NOT counted.
+                locked = locked + ag.escrow_atto
+        return {
+            "escrow_pool_atto": self.escrow_pool_atto,
+            "unwithdrawn_credits_atto": unwithdrawn,
+            "locked_escrow_atto": locked,
+            "invariant_holds": self.escrow_pool_atto == unwithdrawn + locked,
+        }

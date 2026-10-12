@@ -17,7 +17,7 @@ genlayer.db*
 *.sqlite
 artifacts/
 
-# Secrets — never commit private keys
+# Secrets - never commit private keys
 .env
 *.key
 keystores/
@@ -26,3 +26,5 @@ keystores/
 .idea/
 .vscode/
 .DS_Store
+
+.ci_helpers/
