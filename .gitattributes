@@ -1,0 +1,18 @@
+# Normalize line endings so the checked-out bytes exactly match the deployed
+# bytes. GenLayer's deploy tool reads source in text mode (which strips CR),
+# so the on-chain content is always LF. Enforcing eol=lf in-repo removes the
+# CRLF/LF discrepancy for anyone hashing the file with `sha256sum`.
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ini text eol=lf
+*.txt text eol=lf
+*.sh text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
